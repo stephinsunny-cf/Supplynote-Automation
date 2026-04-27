@@ -267,34 +267,84 @@ def get_business_id(token: str) -> str:
 # 4. History
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fetch_latest_version(token: str, biz_id: str, plan_date: str) -> dict:
+def _parse_versions(data) -> list:
+    """Extract a list of version objects from any API response shape."""
+    return data if isinstance(data, list) else (
+        data.get("data") or data.get("history") or data.get("list") or []
+    )
+
+
+def fetch_latest_version(token: str, biz_id: str, plan_date: str) -> tuple[dict, str]:
     """
-    Fetch the semiFinished demand plan history for the given planDate.
-    Returns the latest version object (index 0).
+    Fetch the semiFinished demand plan history.
+
+    Strategy:
+      1. Try yesterday's planDate first.
+      2. If no data found (e.g. Sunday / holiday), fall back to the most
+         recently uploaded entry across all dates.
+
+    Returns (version_dict, display_date_string).
     """
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+    # ── Attempt 1: specific date ──────────────────────────────────────────────
     url = (
         f"{BASE}/demandplan/history/semiFinished"
         f"?business={biz_id}&planDate={requests.utils.quote(plan_date)}"
     )
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-
-    log.info(f"Fetching history: {url}")
+    log.info(f"Fetching history for specific date: {url}")
     res = requests.get(url, headers=headers, timeout=30)
     res.raise_for_status()
 
-    data = res.json()
-    versions = data if isinstance(data, list) else (
-        data.get("data") or data.get("history") or data.get("list") or []
-    )
+    versions = _parse_versions(res.json())
 
-    if not versions:
+    if versions:
+        log.info(f"Found {len(versions)} version(s) for requested date. Using latest.")
+        v = versions[0]
+        # Extract the actual plan date from the version for display
+        raw_date = v.get("planDate") or v.get("plan_date") or plan_date
+        try:
+            dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+            IST = timezone(timedelta(hours=5, minutes=30))
+            display = dt.astimezone(IST).strftime("%d-%m-%Y")
+        except Exception:
+            display = plan_date[:10]
+        return v, display
+
+    # ── Attempt 2: no data for that date — fetch most recent across all dates ──
+    log.warning(
+        f"No data found for {plan_date[:10]} (possibly a holiday/Sunday). "
+        "Fetching most recently uploaded entry instead..."
+    )
+    fallback_url = f"{BASE}/demandplan/history/semiFinished?business={biz_id}"
+    log.info(f"Fallback history URL: {fallback_url}")
+    res2 = requests.get(fallback_url, headers=headers, timeout=30)
+    res2.raise_for_status()
+
+    all_versions = _parse_versions(res2.json())
+
+    if not all_versions:
         raise RuntimeError(
-            f"No Ingredients demand plan found for date: {plan_date}\n"
-            "Make sure demand has been uploaded for today on SupplyNote."
+            "No Ingredients demand plan entries found at all.\n"
+            "Make sure at least one demand plan has been uploaded on SupplyNote."
         )
 
-    log.info(f"Found {len(versions)} version(s). Using latest.")
-    return versions[0]
+    # Sort by planDate descending to get the most recent
+    def _sort_key(v):
+        return v.get("planDate") or v.get("plan_date") or ""
+    all_versions.sort(key=_sort_key, reverse=True)
+
+    latest = all_versions[0]
+    raw_date = latest.get("planDate") or latest.get("plan_date") or ""
+    try:
+        dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+        IST = timezone(timedelta(hours=5, minutes=30))
+        display = dt.astimezone(IST).strftime("%d-%m-%Y")
+    except Exception:
+        display = raw_date[:10]
+
+    log.info(f"Fallback: using most recent entry — plan date {display}")
+    return latest, display
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -919,8 +969,9 @@ def main() -> None:
     biz_id = get_business_id(token)
 
     # Step 4 — Fetch history to get version key
+    # Falls back to most recent entry if yesterday has no data (e.g. Sunday)
     log.info("--- Step 3/5: Fetch history ---")
-    latest = fetch_latest_version(token, biz_id, plan_date)
+    latest, display = fetch_latest_version(token, biz_id, plan_date)
     version_key = (
         latest.get("versionKey") or latest.get("version_key") or
         latest.get("key")        or latest.get("_id")
@@ -928,6 +979,7 @@ def main() -> None:
     if not version_key:
         raise RuntimeError(f"No versionKey in history response: {latest}")
     log.info(f"Version key : {version_key}")
+    log.info(f"Actual report date : {display}")
 
     # Step 5 — Download via API (semiFinished-combined endpoint → S3 link)
     # HAR analysis confirmed: the correct endpoint returns an S3 URL instantly.
@@ -944,7 +996,9 @@ def main() -> None:
         content = download_via_playwright(biz_id, today_ist, version_key)
 
     # Convert CSV → Excel (.xlsx)
-    csv_filename  = f"All_Ingredient_Data_{today_ist.strftime('%Y%m%d')}.csv"
+    # Use the actual report date (from history) for the filename, not just yesterday
+    date_tag = display.replace("-", "")   # e.g. "26042026" from "26-04-2026"
+    csv_filename  = f"All_Ingredient_Data_{date_tag}.csv"
     content, filename = ensure_xlsx(content, csv_filename)
     log.info(f"File ready: {filename} ({len(content):,} bytes)")
 
