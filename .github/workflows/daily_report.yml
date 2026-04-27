@@ -2,8 +2,8 @@ name: SupplyNote Daily Ingredients Report
 
 on:
   schedule:
-    # 9:00 PM IST = 15:30 UTC — runs every day
-    - cron: "30 15 * * *"
+    # 10:00 AM IST = 4:30 UTC — runs every day
+    - cron: "30 4 * * *"
   workflow_dispatch:   # allows manual trigger from GitHub UI
 
 jobs:

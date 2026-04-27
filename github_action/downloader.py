@@ -886,11 +886,12 @@ def main() -> None:
     log.info("  SupplyNote Ingredients Report — Daily Automation")
     log.info("=" * 55)
 
-    # Step 1 — Determine today's date in IST
-    today_ist  = get_ist_now()
+    # Step 1 — Determine yesterday's date in IST
+    # Report runs at 10 AM IST and covers the previous day's demand plan
+    today_ist  = get_ist_now() - timedelta(days=1)
     plan_date  = date_to_plan_date(today_ist)
     display    = today_ist.strftime("%d-%m-%Y")
-    log.info(f"Report date : {display} (IST)")
+    log.info(f"Report date : {display} (IST — yesterday)")
     log.info(f"Plan date   : {plan_date} (UTC)")
 
     # Step 2 — Login (get JWT for history lookup)
