@@ -535,238 +535,47 @@ def download_via_playwright(biz_id: str, today_ist: datetime) -> bytes:
             page.wait_for_timeout(3_000)   # wait for table to reload
             _screenshot(today_ist.strftime("%Y%m%d") + "_ingredients_tab")
 
-            # ── Step 5: Click the ↓ download icon on row 1, then pick option ─
-            # Data table row 1 = latest version.
-            # Click its download icon → md-menu overlay → "All Ingredient Data"
-            #
-            # CRITICAL: Use page.mouse.click(x, y) — NOT element.click() via JS.
-            # AngularJS Material's md-menu needs a real browser click event with
-            # proper coordinates and $event object to open and position the overlay.
-            # JS element.click() triggers an AngularJS digest that resets the view
-            # without properly opening the menu panel.
-            log.info("[Browser] Finding download icon position on row 1 (data table)...")
+            # ── Step 5: Use in-browser fetch() to get the S3 download link ────
+            # Instead of clicking the dropdown menu (unreliable in headless mode),
+            # we run a fetch() call directly inside the browser page.
+            # The browser already has all session cookies set from login, so
+            # this call is authenticated automatically — no JWT header needed.
+            log.info("[Browser] Using in-browser fetch() to get S3 download link...")
 
-            btn_pos = page.evaluate("""() => {
-                // ── Strategy 1: find the table that has a "Download" <th> header ──
-                const allTables = Array.from(document.querySelectorAll('table'));
-                let dataTable = allTables.find(t => {
-                    if (t.closest('md-datepicker') ||
-                        t.closest('.md-datepicker-calendar-pane') ||
-                        t.closest('[class*="calendar"]')) return false;
-                    const ths = Array.from(t.querySelectorAll('th'));
-                    return ths.some(th => /^download$/i.test(th.textContent.trim()));
-                });
+            version_key_js = version_key  # captured from outer scope
+            s3_url = page.evaluate(f"""async () => {{
+                const url = '/api/demandplan/download/semiFinished-combined?type=all&versionKey={version_key}';
+                try {{
+                    const resp = await fetch(url, {{
+                        method: 'GET',
+                        credentials: 'include',
+                        headers: {{ 'Accept': 'application/json' }}
+                    }});
+                    const body = await resp.json();
+                    return body.data || body.url || body.fileUrl || body.download_url || JSON.stringify(body);
+                }} catch(e) {{
+                    return 'fetch_error: ' + e.message;
+                }}
+            }}""")
 
-                // ── Strategy 2: any table with tbody rows outside nav/header/datepicker ──
-                if (!dataTable) {
-                    dataTable = allTables.find(t => {
-                        if (t.closest('md-datepicker') ||
-                            t.closest('.md-datepicker-calendar-pane') ||
-                            t.closest('[class*="calendar"]') ||
-                            t.closest('nav') ||
-                            t.closest('header') ||
-                            t.closest('md-toolbar')) return false;
-                        return t.querySelectorAll('tbody tr').length > 0;
-                    });
-                }
+            log.info(f"[Browser] fetch() result: {str(s3_url)[:120]}")
 
-                if (!dataTable) {
-                    return {error: 'no data table found',
-                            tables: allTables.slice(0,5).map(t =>
-                                Array.from(t.querySelectorAll('th')).map(h => h.textContent.trim()).join('|')
-                            )};
-                }
+            if not s3_url or not isinstance(s3_url, str) or s3_url.startswith('fetch_error') or s3_url.startswith('{'):
+                raise RuntimeError(f"[Browser] fetch() did not return S3 URL: {s3_url}")
 
-                const rows = dataTable.querySelectorAll('tbody tr');
-                if (rows.length === 0) return {error: 'table has no rows'};
-
-                // The last <td> is the Download column
-                const lastTd = rows[0].querySelector('td:last-child');
-                if (!lastTd) return {error: 'no last-child td in first row'};
-
-                // Find the clickable element inside: md-button, button, a, or ng-click
-                const btn = lastTd.querySelector('md-button, button, a, [ng-click]');
-                if (!btn) return {error: 'no button in Download td',
-                                  html: lastTd.innerHTML.substring(0, 300)};
-
-                // Scroll the button into the viewport so coordinates are valid
-                btn.scrollIntoView({block: 'center', inline: 'nearest'});
-
-                const r = btn.getBoundingClientRect();
-                return {
-                    x: r.left + r.width  / 2,
-                    y: r.top  + r.height / 2,
-                    tag: btn.tagName,
-                    text: btn.textContent.trim().substring(0, 50),
-                };
-            }""")
-
-            if not btn_pos or "error" in btn_pos:
-                log.error(f"[Browser] Download button lookup failed: {btn_pos}")
-                _screenshot(today_ist.strftime("%Y%m%d") + "_btn_lookup_failed")
-                raise RuntimeError(
-                    f"[Browser] Could not locate download icon in data table row 1: {btn_pos}. "
-                    "Check the ingredients_tab screenshot."
-                )
-
-            log.info(f"[Browser] Real-clicking download icon at "
-                     f"({btn_pos['x']:.0f}, {btn_pos['y']:.0f}) "
-                     f"[{btn_pos['tag']}] text='{btn_pos.get('text','')}'")
-            # Small pause to let scrollIntoView settle before mouse click
-            page.wait_for_timeout(500)
-            page.mouse.click(btn_pos["x"], btn_pos["y"])
-            _screenshot(today_ist.strftime("%Y%m%d") + "_after_dl_icon_click")
-
-            # Wait for md-menu overlay to appear — use wait_for_function for reliability
-            # in headless mode (GitHub Actions). Simple timeout is not enough.
-            log.info("[Browser] Waiting for dropdown menu to appear...")
-            try:
-                page.wait_for_function(
-                    """() => {
-                        const items = Array.from(document.querySelectorAll('md-menu-item'));
-                        return items.some(i => i.offsetWidth > 0 && i.offsetHeight > 0);
-                    }""",
-                    timeout=8_000,
-                )
-                log.info("[Browser] Dropdown is open.")
-            except Exception:
-                # Menu didn't open — retry the click once
-                log.warning("[Browser] Dropdown didn't appear, retrying click...")
-                page.wait_for_timeout(1_000)
-                page.mouse.click(btn_pos["x"], btn_pos["y"])
-                page.wait_for_timeout(3_000)
-
-            _screenshot(today_ist.strftime("%Y%m%d") + "_dropdown_open")
-
-            # Log every visible item in the menu panel so we can see the exact text
-            visible_menu_items = page.evaluate("""() => {
-                const candidates = Array.from(document.querySelectorAll(
-                    'md-menu-content *, md-menu-item, md-menu-item *, ' +
-                    '[role="menu"] *, .md-open-menu-container *, ' +
-                    '.md-select-menu-container *, .md-menu *'
-                )).filter(el =>
-                    el.offsetWidth > 0 && el.offsetHeight > 0 &&
-                    el.textContent.trim().length > 0
-                );
-                return [...new Set(candidates.map(el => el.textContent.trim()))].slice(0, 20);
-            }""")
-            log.info(f"[Browser] Menu overlay items: {visible_menu_items}")
-
-            # Now click "All Ingredient Data" — the download starts at this click.
-            # IMPORTANT: use page.mouse.click(x, y) with coordinates obtained from
-            # INSIDE md-menu-content (the overlay panel). Never use JS .click() on
-            # menu items — AngularJS Material needs real browser mouse events.
-            try:
-                with page.expect_download(timeout=360_000) as dl_info:
-
-                    # Get the coordinates of "All Ingredient Data" in the open dropdown.
-                    # There can be MULTIPLE md-menu-content elements (e.g. profile menu
-                    # AND download menu). So we search ALL md-menu-item elements across
-                    # the page and find the one with the right text, regardless of which
-                    # md-menu-content it belongs to.
-                    option_pos = page.evaluate("""() => {
-                        // Every table row pre-renders its md-menu-item elements in the DOM
-                        // (hidden). The currently OPEN dropdown is the only one with
-                        // offsetWidth > 0. Filter to visible items only.
-                        const allItems = Array.from(document.querySelectorAll('md-menu-item'));
-
-                        const visibleItems = allItems.filter(item =>
-                            item.offsetWidth > 0 && item.offsetHeight > 0
-                        );
-
-                        // Find "All Ingredient Data" among the visible (open) menu items
-                        let target = visibleItems.find(item =>
-                            /all.ingredient.data/i.test(item.textContent.trim())
-                        );
-
-                        // Strategy 2: check whichever md-menu-content is currently visible
-                        if (!target) {
-                            const mcs = Array.from(document.querySelectorAll('md-menu-content'));
-                            const visibleMc = mcs.find(mc =>
-                                mc.offsetWidth > 0 && mc.offsetHeight > 0 &&
-                                /ingredient/i.test(mc.textContent)
-                            );
-                            if (visibleMc) {
-                                target = Array.from(visibleMc.querySelectorAll(
-                                    'md-menu-item, button, li'
-                                )).find(el =>
-                                    /all.ingredient.data/i.test(el.textContent.trim()) &&
-                                    el.offsetWidth > 0
-                                );
-                            }
-                        }
-
-                        if (!target) {
-                            return {
-                                error:   'All Ingredient Data not found among visible items',
-                                visible: visibleItems.map(i => i.textContent.trim()),
-                                total:   allItems.length,
-                            };
-                        }
-
-                        // Prefer the inner button (carries the ng-click handler)
-                        const btn = target.querySelector('button') || target;
-                        const r = btn.getBoundingClientRect();
-                        return {
-                            x:    r.left + r.width  / 2,
-                            y:    r.top  + r.height / 2,
-                            text: btn.textContent.trim().substring(0, 80),
-                            all:  visibleItems.map(i => i.textContent.trim()),
-                        };
-                    }""")
-
-                    log.info(f"[Browser] Menu lookup: {option_pos}")
-
-                    if option_pos and "x" in option_pos and (option_pos["x"] > 0 or option_pos["y"] > 0):
-                        # Real mouse click — triggers AngularJS ng-click correctly
-                        log.info(f"[Browser] Clicking '{option_pos['text']}' "
-                                 f"at ({option_pos['x']:.0f}, {option_pos['y']:.0f})")
-                        page.mouse.click(option_pos["x"], option_pos["y"])
-                    else:
-                        # Fallback: Playwright strict text locator inside the menu panel
-                        log.warning(f"[Browser] Coordinate lookup failed ({option_pos}), "
-                                    f"trying Playwright locator...")
-                        menu_panel = page.locator("md-menu-content")
-                        found = False
-                        for variant in ["All Ingredient Data", "All Ingredients Data",
-                                        "All ingredient data"]:
-                            try:
-                                btn = menu_panel.get_by_text(variant, exact=False)
-                                if btn.count() > 0:
-                                    btn.first.click(force=True, timeout=5_000)
-                                    log.info(f"[Browser] Clicked via Playwright locator: '{variant}'")
-                                    found = True
-                                    break
-                            except Exception:
-                                continue
-                        if not found:
-                            raise RuntimeError(
-                                f"[Browser] Could not click 'All Ingredient Data'. "
-                                f"Menu state: {option_pos}"
-                            )
-
-                    log.info("[Browser] Waiting for file download to complete (up to 6 min)...")
-                    download = dl_info.value
-
-            except PWTimeout:
-                log.warning("[Browser] Download wait timed out — checking XHR capture...")
-                if captured["bytes"]:
-                    log.info(f"[Browser] Using XHR capture: {len(captured['bytes']):,} bytes")
-                    return captured["bytes"]
-                _screenshot(today_ist.strftime("%Y%m%d_%H%M%S") + "_download_timeout")
-                raise RuntimeError(
-                    "File download timed out after 6 min. "
-                    "SupplyNote server may be overloaded — try again later."
-                )
-
-            fname = download.suggested_filename or f"report_{today_ist.strftime('%Y%m%d')}.xlsx"
-            log.info(f"[Browser] Download captured: {fname}")
-
-            tmp = f"/tmp/sn_{today_ist.strftime('%Y%m%d_%H%M%S')}.xlsx"
-            download.save_as(tmp)
-            with open(tmp, "rb") as f:
-                content = f.read()
-
+            # Download the CSV directly from S3 using requests (no auth needed for S3)
+            log.info(f"[Browser] Downloading from S3: {s3_url[:80]}...")
+            import requests as _req
+            r2 = _req.get(s3_url, timeout=(30, 300), stream=True)
+            r2.raise_for_status()
+            chunks, total = [], 0
+            for chunk in r2.iter_content(chunk_size=65536):
+                if chunk:
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total % (20 * 1024 * 1024) < 65536:
+                        log.info(f"[Browser] Downloaded {total / 1024 / 1024:.0f} MB...")
+            content = b"".join(chunks)
             log.info(f"[Browser] File size: {len(content):,} bytes")
             return content
 
