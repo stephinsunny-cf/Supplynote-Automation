@@ -1,0 +1,50 @@
+name: SupplyNote Daily Ingredients Report
+
+on:
+  schedule:
+    # 9:00 PM IST = 15:30 UTC — runs every day
+    - cron: "30 15 * * *"
+  workflow_dispatch:   # allows manual trigger from GitHub UI
+
+jobs:
+  download-and-email:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r github_action/requirements.txt
+
+      - name: Install Playwright + Chromium (fallback browser)
+        run: |
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Write Google OAuth credentials from secrets
+        run: |
+          mkdir -p github_action/config
+          echo "${{ secrets.GMAIL_TOKEN_JSON }}"       | base64 -d > github_action/config/token.json
+          echo "${{ secrets.GMAIL_CREDENTIALS_JSON }}" | base64 -d > github_action/config/credentials.json
+
+      - name: Run downloader
+        env:
+          SUPPLYNOTE_USER:      ${{ secrets.SUPPLYNOTE_USER }}
+          SUPPLYNOTE_PASS:      ${{ secrets.SUPPLYNOTE_PASS }}
+          SUPPLYNOTE_BUSINESS_ID: ${{ secrets.SUPPLYNOTE_BUSINESS_ID }}
+          EMAIL_USER:           ${{ secrets.EMAIL_USER }}
+          RECIPIENT_EMAIL:      ${{ secrets.RECIPIENT_EMAIL }}
+          GMAIL_CREDENTIALS_PATH: github_action/config/credentials.json
+          GMAIL_TOKEN_PATH:       github_action/config/token.json
+          DOWNLOAD_TYPE:        all
+        run: |
+          cd github_action
+          python downloader.py

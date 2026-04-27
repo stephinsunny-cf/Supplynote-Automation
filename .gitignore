@@ -1,0 +1,25 @@
+# ── Credentials — NEVER commit these ──────────────────────────────────────────
+.env
+config/token.json
+config/credentials.json
+github_action/config/token.json
+github_action/config/credentials.json
+
+# ── Debug screenshots ──────────────────────────────────────────────────────────
+debug_screenshot_*.png
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# ── Downloaded reports ────────────────────────────────────────────────────────
+reports/
+*.csv
+*.xlsx
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+automation.log
