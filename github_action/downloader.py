@@ -535,6 +535,22 @@ def download_via_playwright(biz_id: str, today_ist: datetime, version_key: str =
             page.wait_for_timeout(3_000)   # wait for table to reload
             _screenshot(today_ist.strftime("%Y%m%d") + "_ingredients_tab")
 
+            # ── Safety: Disable "Sync with Production" button ─────────────────
+            # This button must NEVER be clicked by automation — it overwrites
+            # production data. We disable it in the DOM before doing anything else.
+            page.evaluate("""() => {
+                const els = Array.from(document.querySelectorAll('button, md-button, a'));
+                els.forEach(el => {
+                    if (/sync.*(with.*)?production/i.test(el.textContent)) {
+                        el.disabled = true;
+                        el.setAttribute('disabled', 'disabled');
+                        el.style.pointerEvents = 'none';
+                        el.style.opacity = '0.3';
+                    }
+                });
+            }""")
+            log.info("[Browser] 'Sync with Production' button disabled for safety.")
+
             # ── Step 5: Use in-browser fetch() to get the S3 download link ────
             # Instead of clicking the dropdown menu (unreliable in headless mode),
             # we run a fetch() call directly inside the browser page.
