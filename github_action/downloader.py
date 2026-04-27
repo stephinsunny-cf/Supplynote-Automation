@@ -301,7 +301,7 @@ def fetch_latest_version(token: str, biz_id: str, plan_date: str) -> dict:
 # 5. Download via Playwright (primary — bypasses 504)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def download_via_playwright(biz_id: str, today_ist: datetime) -> bytes:
+def download_via_playwright(biz_id: str, today_ist: datetime, version_key: str = "") -> bytes:
     """
     Use a real Chromium browser (Playwright) to navigate the SupplyNote UI
     and download the All Ingredient Data report.
@@ -542,7 +542,6 @@ def download_via_playwright(biz_id: str, today_ist: datetime) -> bytes:
             # this call is authenticated automatically — no JWT header needed.
             log.info("[Browser] Using in-browser fetch() to get S3 download link...")
 
-            version_key_js = version_key  # captured from outer scope
             s3_url = page.evaluate(f"""async () => {{
                 const url = '/api/demandplan/download/semiFinished-combined?type=all&versionKey={version_key}';
                 try {{
@@ -925,7 +924,7 @@ def main() -> None:
     except Exception as api_err:
         log.warning(f"[API] Download failed: {api_err}")
         log.info("[Browser] Falling back to Playwright browser automation...")
-        content = download_via_playwright(biz_id, today_ist)
+        content = download_via_playwright(biz_id, today_ist, version_key)
 
     # Convert CSV → Excel (.xlsx)
     csv_filename  = f"All_Ingredient_Data_{today_ist.strftime('%Y%m%d')}.csv"
