@@ -617,8 +617,25 @@ def download_via_playwright(biz_id: str, today_ist: datetime) -> bytes:
             page.mouse.click(btn_pos["x"], btn_pos["y"])
             _screenshot(today_ist.strftime("%Y%m%d") + "_after_dl_icon_click")
 
-            # Wait for the md-menu overlay panel to render (it appends to document root)
-            page.wait_for_timeout(2_000)
+            # Wait for md-menu overlay to appear — use wait_for_function for reliability
+            # in headless mode (GitHub Actions). Simple timeout is not enough.
+            log.info("[Browser] Waiting for dropdown menu to appear...")
+            try:
+                page.wait_for_function(
+                    """() => {
+                        const items = Array.from(document.querySelectorAll('md-menu-item'));
+                        return items.some(i => i.offsetWidth > 0 && i.offsetHeight > 0);
+                    }""",
+                    timeout=8_000,
+                )
+                log.info("[Browser] Dropdown is open.")
+            except Exception:
+                # Menu didn't open — retry the click once
+                log.warning("[Browser] Dropdown didn't appear, retrying click...")
+                page.wait_for_timeout(1_000)
+                page.mouse.click(btn_pos["x"], btn_pos["y"])
+                page.wait_for_timeout(3_000)
+
             _screenshot(today_ist.strftime("%Y%m%d") + "_dropdown_open")
 
             # Log every visible item in the menu panel so we can see the exact text
