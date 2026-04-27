@@ -311,10 +311,11 @@ def fetch_latest_version(token: str, biz_id: str, plan_date: str) -> tuple[dict,
             display = plan_date[:10]
         return v, display
 
-    # ── Attempt 2: no data for that date — fetch most recent across all dates ──
+    # ── Attempt 2: no data for that date — fetch most recent PAST entry ─────────
+    # IMPORTANT: Never return today's data. We always want a past day's report.
     log.warning(
         f"No data found for {plan_date[:10]} (possibly a holiday/Sunday). "
-        "Fetching most recently uploaded entry instead..."
+        "Fetching most recently uploaded past entry (excluding today)..."
     )
     fallback_url = f"{BASE}/demandplan/history/semiFinished?business={biz_id}"
     log.info(f"Fallback history URL: {fallback_url}")
@@ -329,22 +330,46 @@ def fetch_latest_version(token: str, biz_id: str, plan_date: str) -> tuple[dict,
             "Make sure at least one demand plan has been uploaded on SupplyNote."
         )
 
-    # Sort by planDate descending to get the most recent
+    # Sort by planDate descending
     def _sort_key(v):
         return v.get("planDate") or v.get("plan_date") or ""
     all_versions.sort(key=_sort_key, reverse=True)
 
-    latest = all_versions[0]
-    raw_date = latest.get("planDate") or latest.get("plan_date") or ""
+    # Get today's date in IST — we must NEVER pick today's entry
+    IST = timezone(timedelta(hours=5, minutes=30))
+    today_ist_date = datetime.now(IST).date()
+    log.info(f"Today in IST: {today_ist_date} — will skip any entry matching this date")
+
+    chosen = None
+    for v in all_versions:
+        raw_date = v.get("planDate") or v.get("plan_date") or ""
+        try:
+            dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+            entry_date = dt.astimezone(IST).date()
+            if entry_date < today_ist_date:
+                chosen = v
+                log.info(f"Fallback: found past entry — plan date {entry_date}")
+                break
+            else:
+                log.info(f"Fallback: skipping today's entry ({entry_date})")
+        except Exception:
+            continue
+
+    if chosen is None:
+        raise RuntimeError(
+            "No past demand plan entries found (all entries are from today or undated).\n"
+            "Please make sure historical data is available on SupplyNote."
+        )
+
+    raw_date = chosen.get("planDate") or chosen.get("plan_date") or ""
     try:
         dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
-        IST = timezone(timedelta(hours=5, minutes=30))
         display = dt.astimezone(IST).strftime("%d-%m-%Y")
     except Exception:
         display = raw_date[:10]
 
-    log.info(f"Fallback: using most recent entry — plan date {display}")
-    return latest, display
+    log.info(f"Fallback: using entry — plan date {display}")
+    return chosen, display
 
 
 # ─────────────────────────────────────────────────────────────────────────────
