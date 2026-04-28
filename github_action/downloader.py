@@ -812,43 +812,107 @@ def _compress_to_zip(file_bytes: bytes, filename: str) -> tuple[bytes, str]:
     return zip_bytes, zip_name
 
 
+def _get_or_create_month_folder(drive, parent_folder_id: str, month_name: str) -> str:
+    """
+    Look for a subfolder named e.g. 'April - 2026' inside the shared folder.
+    Creates it if it doesn't exist. Returns the folder ID.
+    """
+    # Search for existing folder with this name under the parent
+    query = (
+        f"name = '{month_name}' "
+        f"and '{parent_folder_id}' in parents "
+        f"and mimeType = 'application/vnd.google-apps.folder' "
+        f"and trashed = false"
+    )
+    results = drive.files().list(q=query, fields="files(id, name)").execute()
+    folders = results.get("files", [])
+
+    if folders:
+        folder_id = folders[0]["id"]
+        log.info(f"[Drive] Found existing folder '{month_name}' (id={folder_id})")
+        return folder_id
+
+    # Create the month folder inside the shared parent
+    meta = {
+        "name": month_name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_folder_id],
+    }
+    folder = drive.files().create(body=meta, fields="id").execute()
+    folder_id = folder["id"]
+    log.info(f"[Drive] Created new folder '{month_name}' (id={folder_id})")
+    return folder_id
+
+
+# Shared Drive folder ID — files are organised by month inside this folder
+SHARED_DRIVE_FOLDER_ID = "1-kZ4eTM4jK72KK9_U-W7yRcNtYhG4KPH"
+
+
 def _upload_to_drive(file_bytes: bytes, filename: str, creds) -> str:
     """
-    Upload CSV to Google Drive and return a direct download link.
-    File is shared as 'anyone with link can view'.
+    Upload file to the shared Google Drive folder, organised by month.
+
+    Structure:
+      Shared Folder/
+        April 2026/
+          All_Ingredient_Data_26042026.xlsx
+        May 2026/
+          All_Ingredient_Data_01052026.xlsx
+
+    The month is extracted from the filename (format: All_Ingredient_Data_DDMMYYYY.xlsx).
+    Falls back to current IST month if date can't be parsed from filename.
     """
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaInMemoryUpload
 
     drive = build("drive", "v3", credentials=creds)
 
+    # ── Determine month folder name from filename ─────────────────────────────
+    # Filename format: All_Ingredient_Data_DDMMYYYY.xlsx  e.g. 26042026
+    month_name = None
+    try:
+        # Extract the date part — 8 digits before .xlsx
+        date_part = re.search(r"(\d{8})\.", filename)
+        if date_part:
+            date_str = date_part.group(1)   # e.g. "26042026"
+            day   = int(date_str[0:2])
+            month = int(date_str[2:4])
+            year  = int(date_str[4:8])
+            dt    = datetime(year, month, day)
+            month_name = dt.strftime("%B - %Y")   # e.g. "April - 2026"
+    except Exception:
+        pass
+
+    if not month_name:
+        # Fallback: use current IST month
+        IST = timezone(timedelta(hours=5, minutes=30))
+        month_name = datetime.now(IST).strftime("%B - %Y")
+
+    log.info(f"[Drive] Target folder: '{month_name}' inside shared folder")
+
+    # ── Get or create the month subfolder ────────────────────────────────────
+    month_folder_id = _get_or_create_month_folder(drive, SHARED_DRIVE_FOLDER_ID, month_name)
+
+    # ── Upload the file into the month folder ─────────────────────────────────
     mimetype = (
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         if filename.endswith(".xlsx") else "text/csv"
     )
-    media = MediaInMemoryUpload(
-        file_bytes,
-        mimetype=mimetype,
-        resumable=True,
-    )
-    meta = {"name": filename}
-    uploaded = drive.files().create(
-        body=meta, media_body=media, fields="id"
-    ).execute()
-    file_id = uploaded["id"]
+    media = MediaInMemoryUpload(file_bytes, mimetype=mimetype, resumable=True)
+    meta  = {"name": filename, "parents": [month_folder_id]}
 
-    # Anyone with the link can download
+    uploaded = drive.files().create(body=meta, media_body=media, fields="id").execute()
+    file_id  = uploaded["id"]
+
+    # Make the file accessible to anyone with the link
     drive.permissions().create(
         fileId=file_id,
         body={"type": "anyone", "role": "reader"},
     ).execute()
 
-    info = drive.files().get(
-        fileId=file_id, fields="webViewLink,webContentLink"
-    ).execute()
-
+    info = drive.files().get(fileId=file_id, fields="webViewLink,webContentLink").execute()
     link = info.get("webContentLink") or info.get("webViewLink")
-    log.info(f"[Drive] Uploaded '{filename}' → {link}")
+    log.info(f"[Drive] Uploaded '{filename}' → {month_name}/ → {link}")
     return link
 
 
