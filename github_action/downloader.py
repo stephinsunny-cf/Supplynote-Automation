@@ -453,8 +453,8 @@ def download_via_playwright(biz_id: str, today_ist: datetime, version_key: str =
             log.info("[Browser] Navigating to https://www.supplynote.in/signin ...")
             page.goto(
                 "https://www.supplynote.in/signin",
-                wait_until="networkidle",
-                timeout=30_000,
+                wait_until="domcontentloaded",
+                timeout=60_000,
             )
             page.wait_for_timeout(1_000)
 
