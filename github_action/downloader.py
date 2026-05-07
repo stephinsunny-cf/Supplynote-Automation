@@ -923,10 +923,11 @@ def _build_mime(filename: str, report_date: str,
     msg = MIMEMultipart()
     msg["From"]    = sender
     msg["To"]      = recipient
-    msg["Subject"] = f"SupplyNote Ingredients Report — {report_date}"
+    report_title = os.environ.get("REPORT_TITLE", "SupplyNote Ingredients Report")
+    msg["Subject"] = f"{report_title} — {report_date}"
     body = (
         f"Hi,\n\n"
-        f"The All Ingredient Data report for {report_date} is ready.\n\n"
+        f"The {report_title} for {report_date} is ready.\n\n"
         f"  File   : {filename}\n"
         f"  Date   : {report_date}\n"
         f"  Type   : {DOWNLOAD_TYPE}\n\n"

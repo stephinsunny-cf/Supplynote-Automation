@@ -43,6 +43,7 @@ jobs:
           GMAIL_TOKEN_PATH:       github_action/config/token.json
           DOWNLOAD_TYPE:          all
           REPORT_DATE:            today
+          REPORT_TITLE:           SupplyNote Current Stock Report
         run: |
           cd github_action
           python downloader.py
