@@ -44,6 +44,7 @@ jobs:
           DOWNLOAD_TYPE:          all
           REPORT_DATE:            today
           REPORT_TITLE:           SupplyNote Current Stock Report
+          SKIP_DRIVE_UPLOAD:      true
         run: |
           cd github_action
           python downloader.py

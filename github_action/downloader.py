@@ -979,18 +979,39 @@ def _send_via_oauth2(file_bytes: bytes, filename: str, report_date: str) -> bool
             return False
 
     recipient = os.environ.get("RECIPIENT_EMAIL", "") or sender
+    skip_drive = os.environ.get("SKIP_DRIVE_UPLOAD", "false").strip().lower() == "true"
 
-    # File is too large to attach directly (114 MB > Gmail's 25 MB limit).
-    # Upload to Google Drive and email the download link instead.
-    log.info(f"[Drive] Uploading {filename} ({len(file_bytes):,} bytes) to Google Drive...")
-    drive_link = _upload_to_drive(file_bytes, filename, creds)
-
-    msg = _build_mime(filename, report_date, sender, recipient, drive_link)
+    if skip_drive:
+        # Send as direct email attachment (no Drive upload)
+        log.info(f"[Email] Attaching {filename} directly ({len(file_bytes) / 1024 / 1024:.1f} MB)...")
+        from email.mime.application import MIMEApplication
+        report_title = os.environ.get("REPORT_TITLE", "SupplyNote Ingredients Report")
+        msg = MIMEMultipart()
+        msg["From"]    = sender
+        msg["To"]      = recipient
+        msg["Subject"] = f"{report_title} — {report_date}"
+        body = (
+            f"Hi,\n\n"
+            f"Please find the {report_title} for {report_date} attached.\n\n"
+            f"  File   : {filename}\n"
+            f"  Date   : {report_date}\n\n"
+            f"This email was sent automatically by the SupplyNote Report Automation.\n\n"
+            f"Regards,\nSupplyNote Automation"
+        )
+        msg.attach(MIMEText(body, "plain"))
+        attachment = MIMEApplication(file_bytes, _subtype="octet-stream")
+        attachment.add_header("Content-Disposition", "attachment", filename=filename)
+        msg.attach(attachment)
+    else:
+        # Upload to Google Drive and email the download link
+        log.info(f"[Drive] Uploading {filename} ({len(file_bytes):,} bytes) to Google Drive...")
+        drive_link = _upload_to_drive(file_bytes, filename, creds)
+        msg = _build_mime(filename, report_date, sender, recipient, drive_link)
 
     gmail = build("gmail", "v1", credentials=creds)
     raw   = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     gmail.users().messages().send(userId="me", body={"raw": raw}).execute()
-    log.info(f"Email sent to {recipient} with Drive download link.")
+    log.info(f"Email sent to {recipient}.")
     return True
 
 
