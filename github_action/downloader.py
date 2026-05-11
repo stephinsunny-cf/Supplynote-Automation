@@ -982,26 +982,45 @@ def _send_via_oauth2(file_bytes: bytes, filename: str, report_date: str) -> bool
     skip_drive = os.environ.get("SKIP_DRIVE_UPLOAD", "false").strip().lower() == "true"
 
     if skip_drive:
-        # Send as direct email attachment (no Drive upload)
-        log.info(f"[Email] Attaching {filename} directly ({len(file_bytes) / 1024 / 1024:.1f} MB)...")
         from email.mime.application import MIMEApplication
         report_title = os.environ.get("REPORT_TITLE", "SupplyNote Ingredients Report")
+        size_mb = len(file_bytes) / 1024 / 1024
+        log.info(f"[Email] File size: {size_mb:.1f} MB")
+
         msg = MIMEMultipart()
         msg["From"]    = sender
         msg["To"]      = recipient
         msg["Subject"] = f"{report_title} — {report_date}"
-        body = (
-            f"Hi,\n\n"
-            f"Please find the {report_title} for {report_date} attached.\n\n"
-            f"  File   : {filename}\n"
-            f"  Date   : {report_date}\n\n"
-            f"This email was sent automatically by the SupplyNote Report Automation.\n\n"
-            f"Regards,\nSupplyNote Automation"
-        )
-        msg.attach(MIMEText(body, "plain"))
-        attachment = MIMEApplication(file_bytes, _subtype="octet-stream")
-        attachment.add_header("Content-Disposition", "attachment", filename=filename)
-        msg.attach(attachment)
+
+        if size_mb < 20:
+            # Small enough — attach directly
+            log.info(f"[Email] Attaching {filename} directly ({size_mb:.1f} MB)...")
+            body = (
+                f"Hi,\n\n"
+                f"Please find the {report_title} for {report_date} attached.\n\n"
+                f"  File   : {filename}\n"
+                f"  Date   : {report_date}\n\n"
+                f"This email was sent automatically by the SupplyNote Report Automation.\n\n"
+                f"Regards,\nSupplyNote Automation"
+            )
+            msg.attach(MIMEText(body, "plain"))
+            attachment = MIMEApplication(file_bytes, _subtype="octet-stream")
+            attachment.add_header("Content-Disposition", "attachment", filename=filename)
+            msg.attach(attachment)
+        else:
+            # Too large — upload to Drive and send link
+            log.info(f"[Email] File too large ({size_mb:.1f} MB) — uploading to Drive...")
+            drive_link = _upload_to_drive(file_bytes, filename, creds)
+            body = (
+                f"Hi,\n\n"
+                f"The {report_title} for {report_date} is ready.\n\n"
+                f"  File   : {filename}\n"
+                f"  Date   : {report_date}\n\n"
+                f"Download link (Google Drive):\n{drive_link}\n\n"
+                f"This email was sent automatically by the SupplyNote Report Automation.\n\n"
+                f"Regards,\nSupplyNote Automation"
+            )
+            msg.attach(MIMEText(body, "plain"))
     else:
         # Upload to Google Drive and email the download link
         log.info(f"[Drive] Uploading {filename} ({len(file_bytes):,} bytes) to Google Drive...")
@@ -1113,12 +1132,22 @@ def main() -> None:
         log.info("[Browser] Falling back to Playwright browser automation...")
         content = download_via_playwright(biz_id, today_ist, version_key)
 
-    # Convert CSV → Excel (.xlsx)
-    # Use the actual report date (from history) for the filename, not just yesterday
-    date_tag = display.replace("-", "")   # e.g. "26042026" from "26-04-2026"
-    csv_filename  = f"All_Ingredient_Data_{date_tag}.csv"
-    content, filename = ensure_xlsx(content, csv_filename)
-    log.info(f"File ready: {filename} ({len(content):,} bytes)")
+    # For today's report: send as CSV (smaller file, better chance of direct attachment)
+    # For yesterday's report: convert to xlsx as usual
+    date_tag     = display.replace("-", "")   # e.g. "26042026" from "26-04-2026"
+    csv_filename = f"All_Ingredient_Data_{date_tag}.csv"
+    skip_drive   = os.environ.get("SKIP_DRIVE_UPLOAD", "false").strip().lower() == "true"
+
+    if skip_drive:
+        # Keep as CSV — skip xlsx conversion to keep file size smaller
+        if content[:2] == b"PK":
+            filename = csv_filename.replace(".csv", ".xlsx")
+        else:
+            filename = csv_filename
+        log.info(f"File ready (CSV): {filename} ({len(content):,} bytes)")
+    else:
+        content, filename = ensure_xlsx(content, csv_filename)
+        log.info(f"File ready (xlsx): {filename} ({len(content):,} bytes)")
 
     # Step 6 — Email
     log.info("--- Step 5/5: Send email ---")
