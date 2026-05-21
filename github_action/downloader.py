@@ -939,6 +939,34 @@ def _build_mime(filename: str, report_date: str,
     return msg
 
 
+def _cleanup_old_current_stock_files(creds, days: int = 3) -> None:
+    """
+    Delete Current_Stock_Data_* files in Drive that are older than `days` days.
+    Only touches files with that exact name prefix — all other files are safe.
+    """
+    try:
+        from googleapiclient.discovery import build
+        from datetime import timezone as tz
+        drive    = build("drive", "v3", credentials=creds)
+        cutoff   = (datetime.now(tz.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        query    = (
+            f"name contains 'Current_Stock_Data_' "
+            f"and createdTime < '{cutoff}' "
+            f"and trashed = false"
+        )
+        results  = drive.files().list(q=query, fields="files(id, name, createdTime)").execute()
+        files    = results.get("files", [])
+        if not files:
+            log.info("[Cleanup] No old Current_Stock_Data files to delete.")
+            return
+        for f in files:
+            drive.files().delete(fileId=f["id"]).execute()
+            log.info(f"[Cleanup] Deleted: {f['name']} (created {f['createdTime']})")
+        log.info(f"[Cleanup] Deleted {len(files)} old file(s).")
+    except Exception as ex:
+        log.warning(f"[Cleanup] Failed to delete old files: {ex}")
+
+
 def _send_via_oauth2(file_bytes: bytes, filename: str, report_date: str) -> bool:
     """
     Send email using Gmail API + OAuth2 (credentials.json / token.json).
@@ -978,51 +1006,36 @@ def _send_via_oauth2(file_bytes: bytes, filename: str, report_date: str) -> bool
             log.warning("OAuth2 token invalid and cannot be refreshed.")
             return False
 
-    recipient = os.environ.get("RECIPIENT_EMAIL", "") or sender
+    recipient  = os.environ.get("RECIPIENT_EMAIL", "") or sender
     skip_drive = os.environ.get("SKIP_DRIVE_UPLOAD", "false").strip().lower() == "true"
+    report_title = os.environ.get("REPORT_TITLE", "SupplyNote Ingredients Report")
 
     if skip_drive:
-        from email.mime.application import MIMEApplication
-        report_title = os.environ.get("REPORT_TITLE", "SupplyNote Ingredients Report")
-        size_mb = len(file_bytes) / 1024 / 1024
-        log.info(f"[Email] File size: {size_mb:.1f} MB")
+        # ── 11:30 AM run ──────────────────────────────────────────────────────
+        # Step 1: Delete Current_Stock_Data_* files older than 3 days
+        _cleanup_old_current_stock_files(creds, days=3)
 
+        # Step 2: Upload today's file to Drive
+        log.info(f"[Drive] Uploading {filename} ({len(file_bytes)/1024/1024:.1f} MB)...")
+        drive_link = _upload_to_drive(file_bytes, filename, creds)
+
+        # Step 3: Build email with Drive link only
         msg = MIMEMultipart()
         msg["From"]    = sender
         msg["To"]      = recipient
         msg["Subject"] = f"{report_title} — {report_date}"
-
-        if size_mb < 20:
-            # Small enough — attach directly
-            log.info(f"[Email] Attaching {filename} directly ({size_mb:.1f} MB)...")
-            body = (
-                f"Hi,\n\n"
-                f"Please find the {report_title} for {report_date} attached.\n\n"
-                f"  File   : {filename}\n"
-                f"  Date   : {report_date}\n\n"
-                f"This email was sent automatically by the SupplyNote Report Automation.\n\n"
-                f"Regards,\nSupplyNote Automation"
-            )
-            msg.attach(MIMEText(body, "plain"))
-            attachment = MIMEApplication(file_bytes, _subtype="octet-stream")
-            attachment.add_header("Content-Disposition", "attachment", filename=filename)
-            msg.attach(attachment)
-        else:
-            # Too large — upload to Drive and send link
-            log.info(f"[Email] File too large ({size_mb:.1f} MB) — uploading to Drive...")
-            drive_link = _upload_to_drive(file_bytes, filename, creds)
-            body = (
-                f"Hi,\n\n"
-                f"The {report_title} for {report_date} is ready.\n\n"
-                f"  File   : {filename}\n"
-                f"  Date   : {report_date}\n\n"
-                f"Download link (Google Drive):\n{drive_link}\n\n"
-                f"This email was sent automatically by the SupplyNote Report Automation.\n\n"
-                f"Regards,\nSupplyNote Automation"
-            )
-            msg.attach(MIMEText(body, "plain"))
+        body = (
+            f"Hi,\n\n"
+            f"The {report_title} for {report_date} is ready.\n\n"
+            f"  File   : {filename}\n"
+            f"  Date   : {report_date}\n\n"
+            f"Download link (Google Drive — available for 3 days):\n{drive_link}\n\n"
+            f"This email was sent automatically by the SupplyNote Report Automation.\n\n"
+            f"Regards,\nSupplyNote Automation"
+        )
+        msg.attach(MIMEText(body, "plain"))
     else:
-        # Upload to Google Drive and email the download link
+        # ── 10 AM run — upload to Drive and email link ─────────────────────
         log.info(f"[Drive] Uploading {filename} ({len(file_bytes):,} bytes) to Google Drive...")
         drive_link = _upload_to_drive(file_bytes, filename, creds)
         msg = _build_mime(filename, report_date, sender, recipient, drive_link)
@@ -1139,11 +1152,8 @@ def main() -> None:
     skip_drive   = os.environ.get("SKIP_DRIVE_UPLOAD", "false").strip().lower() == "true"
 
     if skip_drive:
-        # Keep as CSV — skip xlsx conversion to keep file size smaller
-        if content[:2] == b"PK":
-            filename = csv_filename.replace(".csv", ".xlsx")
-        else:
-            filename = csv_filename
+        # Rename to Current_Stock_Data_* for the 11:30 AM run
+        filename = f"Current_Stock_Data_{date_tag}.csv"
         log.info(f"File ready (CSV): {filename} ({len(content):,} bytes)")
     else:
         content, filename = ensure_xlsx(content, csv_filename)
