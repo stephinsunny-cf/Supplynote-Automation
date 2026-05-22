@@ -939,29 +939,59 @@ def _build_mime(filename: str, report_date: str,
     return msg
 
 
-def _cleanup_old_current_stock_files(creds, days: int = 3) -> None:
+CURRENT_STOCK_FOLDER_ID = "1zreUHrm5M-veQe3NwgYLbvf58Lf-hU0-"
+
+
+def _upload_current_stock_to_drive(file_bytes: bytes, filename: str, creds) -> str:
     """
-    Delete Current_Stock_Data_* files in Drive that are older than `days` days.
-    Only touches files with that exact name prefix — all other files are safe.
+    Upload today's Current_Stock_Data file directly into CURRENT_STOCK_FOLDER_ID.
+    Returns the download link.
+    """
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaInMemoryUpload
+
+    drive    = build("drive", "v3", credentials=creds)
+    mimetype = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    media    = MediaInMemoryUpload(file_bytes, mimetype=mimetype, resumable=True)
+    meta     = {"name": filename, "parents": [CURRENT_STOCK_FOLDER_ID]}
+
+    uploaded = drive.files().create(body=meta, media_body=media, fields="id").execute()
+    file_id  = uploaded["id"]
+
+    # Make accessible to anyone with the link
+    drive.permissions().create(
+        fileId=file_id,
+        body={"type": "anyone", "role": "reader"},
+    ).execute()
+
+    info = drive.files().get(fileId=file_id, fields="webContentLink,webViewLink").execute()
+    link = info.get("webContentLink") or info.get("webViewLink")
+    log.info(f"[Drive] Uploaded '{filename}' to current stock folder → {link}")
+    return link
+
+
+def _cleanup_old_current_stock_files(creds) -> None:
+    """
+    Delete ALL Current_Stock_Data_* files in the current stock folder.
+    Runs before each new upload — so only today's file remains.
+    Only touches files inside CURRENT_STOCK_FOLDER_ID with that name prefix.
     """
     try:
         from googleapiclient.discovery import build
-        from datetime import timezone as tz
-        drive    = build("drive", "v3", credentials=creds)
-        cutoff   = (datetime.now(tz.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        query    = (
+        drive   = build("drive", "v3", credentials=creds)
+        query   = (
             f"name contains 'Current_Stock_Data_' "
-            f"and createdTime < '{cutoff}' "
+            f"and '{CURRENT_STOCK_FOLDER_ID}' in parents "
             f"and trashed = false"
         )
-        results  = drive.files().list(q=query, fields="files(id, name, createdTime)").execute()
-        files    = results.get("files", [])
+        results = drive.files().list(q=query, fields="files(id, name)").execute()
+        files   = results.get("files", [])
         if not files:
             log.info("[Cleanup] No old Current_Stock_Data files to delete.")
             return
         for f in files:
             drive.files().delete(fileId=f["id"]).execute()
-            log.info(f"[Cleanup] Deleted: {f['name']} (created {f['createdTime']})")
+            log.info(f"[Cleanup] Deleted: {f['name']}")
         log.info(f"[Cleanup] Deleted {len(files)} old file(s).")
     except Exception as ex:
         log.warning(f"[Cleanup] Failed to delete old files: {ex}")
@@ -1012,12 +1042,12 @@ def _send_via_oauth2(file_bytes: bytes, filename: str, report_date: str) -> bool
 
     if skip_drive:
         # ── 11:30 AM run ──────────────────────────────────────────────────────
-        # Step 1: Delete Current_Stock_Data_* files older than 3 days
-        _cleanup_old_current_stock_files(creds, days=3)
+        # Step 1: Delete yesterday's Current_Stock_Data file from the folder
+        _cleanup_old_current_stock_files(creds)
 
-        # Step 2: Upload today's file to Drive
-        log.info(f"[Drive] Uploading {filename} ({len(file_bytes)/1024/1024:.1f} MB)...")
-        drive_link = _upload_to_drive(file_bytes, filename, creds)
+        # Step 2: Upload today's file directly into the current stock folder
+        log.info(f"[Drive] Uploading {filename} ({len(file_bytes)/1024/1024:.1f} MB) to current stock folder...")
+        drive_link = _upload_current_stock_to_drive(file_bytes, filename, creds)
 
         # Step 3: Build email with Drive link only
         msg = MIMEMultipart()
