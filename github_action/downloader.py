@@ -1152,9 +1152,10 @@ def main() -> None:
     skip_drive   = os.environ.get("SKIP_DRIVE_UPLOAD", "false").strip().lower() == "true"
 
     if skip_drive:
-        # Rename to Current_Stock_Data_* for the 11:30 AM run
-        filename = f"Current_Stock_Data_{date_tag}.csv"
-        log.info(f"File ready (CSV): {filename} ({len(content):,} bytes)")
+        # Convert to xlsx and rename to Current_Stock_Data_* for the 11:30 AM run
+        content, _ = ensure_xlsx(content, csv_filename)
+        filename = f"Current_Stock_Data_{date_tag}.xlsx"
+        log.info(f"File ready (xlsx): {filename} ({len(content):,} bytes)")
     else:
         content, filename = ensure_xlsx(content, csv_filename)
         log.info(f"File ready (xlsx): {filename} ({len(content):,} bytes)")
