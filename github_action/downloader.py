@@ -980,7 +980,7 @@ def _cleanup_old_current_stock_files(creds) -> None:
         from googleapiclient.discovery import build
         drive   = build("drive", "v3", credentials=creds)
         query   = (
-            f"name contains 'Current_Stock_Data_' "
+            f"name contains 'All_Ingredient_Data_' "
             f"and '{CURRENT_STOCK_FOLDER_ID}' in parents "
             f"and trashed = false"
         )
@@ -1182,9 +1182,8 @@ def main() -> None:
     skip_drive   = os.environ.get("SKIP_DRIVE_UPLOAD", "false").strip().lower() == "true"
 
     if skip_drive:
-        # Convert to xlsx and rename to Current_Stock_Data_* for the 11:30 AM run
-        content, _ = ensure_xlsx(content, csv_filename)
-        filename = f"Current_Stock_Data_{date_tag}.xlsx"
+        # Convert to xlsx — keep original filename All_Ingredient_Data_* for the 11:30 AM run
+        content, filename = ensure_xlsx(content, csv_filename)
         log.info(f"File ready (xlsx): {filename} ({len(content):,} bytes)")
     else:
         content, filename = ensure_xlsx(content, csv_filename)
