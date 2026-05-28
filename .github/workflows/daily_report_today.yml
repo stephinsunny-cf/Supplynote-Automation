@@ -1,7 +1,7 @@
 name: SupplyNote Today Ingredients Report
 
 on:
-  workflow_dispatch:   # triggered by cron-job.org at 11:30 AM IST every day
+  workflow_dispatch:   # triggered by cron-job.org every 2 hours from 8 AM to 6 PM IST
 
 jobs:
   download-and-email:
