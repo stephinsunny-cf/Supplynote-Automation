@@ -38,7 +38,7 @@ jobs:
           SUPPLYNOTE_PASS:        ${{ secrets.SUPPLYNOTE_PASS }}
           SUPPLYNOTE_BUSINESS_ID: ${{ secrets.SUPPLYNOTE_BUSINESS_ID }}
           EMAIL_USER:             ${{ secrets.EMAIL_USER }}
-          RECIPIENT_EMAIL:        ${{ secrets.RECIPIENT_EMAIL }}
+          RECIPIENT_EMAIL:        ${{ secrets.RECIPIENT_EMAIL_TODAY }}
           GMAIL_CREDENTIALS_PATH: github_action/config/credentials.json
           GMAIL_TOKEN_PATH:       github_action/config/token.json
           DOWNLOAD_TYPE:          all
