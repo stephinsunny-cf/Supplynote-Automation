@@ -824,7 +824,12 @@ def _get_or_create_month_folder(drive, parent_folder_id: str, month_name: str) -
         f"and mimeType = 'application/vnd.google-apps.folder' "
         f"and trashed = false"
     )
-    results = drive.files().list(q=query, fields="files(id, name)").execute()
+    results = drive.files().list(
+        q=query, 
+        fields="files(id, name)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True
+    ).execute()
     folders = results.get("files", [])
 
     if folders:
@@ -838,7 +843,7 @@ def _get_or_create_month_folder(drive, parent_folder_id: str, month_name: str) -
         "mimeType": "application/vnd.google-apps.folder",
         "parents": [parent_folder_id],
     }
-    folder = drive.files().create(body=meta, fields="id").execute()
+    folder = drive.files().create(body=meta, fields="id", supportsAllDrives=True).execute()
     folder_id = folder["id"]
     log.info(f"[Drive] Created new folder '{month_name}' (id={folder_id})")
     return folder_id
@@ -901,16 +906,17 @@ def _upload_to_drive(file_bytes: bytes, filename: str, creds) -> str:
     media = MediaInMemoryUpload(file_bytes, mimetype=mimetype, resumable=True)
     meta  = {"name": filename, "parents": [month_folder_id]}
 
-    uploaded = drive.files().create(body=meta, media_body=media, fields="id").execute()
+    uploaded = drive.files().create(body=meta, media_body=media, fields="id", supportsAllDrives=True).execute()
     file_id  = uploaded["id"]
 
     # Make the file accessible to anyone with the link
     drive.permissions().create(
         fileId=file_id,
         body={"type": "anyone", "role": "reader"},
+        supportsAllDrives=True
     ).execute()
 
-    info = drive.files().get(fileId=file_id, fields="webViewLink,webContentLink").execute()
+    info = drive.files().get(fileId=file_id, fields="webViewLink,webContentLink", supportsAllDrives=True).execute()
     link = info.get("webContentLink") or info.get("webViewLink")
     log.info(f"[Drive] Uploaded '{filename}' → {month_name}/ → {link}")
     return link
@@ -955,16 +961,17 @@ def _upload_current_stock_to_drive(file_bytes: bytes, filename: str, creds) -> s
     media    = MediaInMemoryUpload(file_bytes, mimetype=mimetype, resumable=True)
     meta     = {"name": filename, "parents": [CURRENT_STOCK_FOLDER_ID]}
 
-    uploaded = drive.files().create(body=meta, media_body=media, fields="id").execute()
+    uploaded = drive.files().create(body=meta, media_body=media, fields="id", supportsAllDrives=True).execute()
     file_id  = uploaded["id"]
 
     # Make accessible to anyone with the link
     drive.permissions().create(
         fileId=file_id,
         body={"type": "anyone", "role": "reader"},
+        supportsAllDrives=True
     ).execute()
 
-    info = drive.files().get(fileId=file_id, fields="webContentLink,webViewLink").execute()
+    info = drive.files().get(fileId=file_id, fields="webContentLink,webViewLink", supportsAllDrives=True).execute()
     link = info.get("webContentLink") or info.get("webViewLink")
     log.info(f"[Drive] Uploaded '{filename}' to current stock folder → {link}")
     return link
@@ -984,13 +991,18 @@ def _cleanup_old_current_stock_files(creds) -> None:
             f"and '{CURRENT_STOCK_FOLDER_ID}' in parents "
             f"and trashed = false"
         )
-        results = drive.files().list(q=query, fields="files(id, name)").execute()
+        results = drive.files().list(
+            q=query, 
+            fields="files(id, name)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
+        ).execute()
         files   = results.get("files", [])
         if not files:
             log.info("[Cleanup] No old Current_Stock_Data files to delete.")
             return
         for f in files:
-            drive.files().delete(fileId=f["id"]).execute()
+            drive.files().delete(fileId=f["id"], supportsAllDrives=True).execute()
             log.info(f"[Cleanup] Deleted: {f['name']}")
         log.info(f"[Cleanup] Deleted {len(files)} old file(s).")
     except Exception as ex:
