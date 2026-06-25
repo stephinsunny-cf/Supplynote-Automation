@@ -916,8 +916,8 @@ def _upload_to_drive(file_bytes: bytes, filename: str, creds) -> str:
         supportsAllDrives=True
     ).execute()
 
-    info = drive.files().get(fileId=file_id, fields="webViewLink,webContentLink", supportsAllDrives=True).execute()
-    link = info.get("webContentLink") or info.get("webViewLink")
+    info = drive.files().get(fileId=file_id, fields="webViewLink", supportsAllDrives=True).execute()
+    link = info.get("webViewLink")
     log.info(f"[Drive] Uploaded '{filename}' → {month_name}/ → {link}")
     return link
 
@@ -971,8 +971,8 @@ def _upload_current_stock_to_drive(file_bytes: bytes, filename: str, creds) -> s
         supportsAllDrives=True
     ).execute()
 
-    info = drive.files().get(fileId=file_id, fields="webContentLink,webViewLink", supportsAllDrives=True).execute()
-    link = info.get("webContentLink") or info.get("webViewLink")
+    info = drive.files().get(fileId=file_id, fields="webViewLink", supportsAllDrives=True).execute()
+    link = info.get("webViewLink")
     log.info(f"[Drive] Uploaded '{filename}' to current stock folder → {link}")
     return link
 
