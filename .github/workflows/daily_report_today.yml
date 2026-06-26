@@ -2,9 +2,20 @@ name: SupplyNote Today Ingredients Report
 
 on:
   workflow_dispatch:   # triggered by cron-job.org every 2 hours from 8 AM to 6 PM IST
+    inputs:
+      report_type:
+        description: 'Which report to run?'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - full
+          - 107_locations
 
 jobs:
   download-and-email:
+    if: ${{ inputs.report_type == 'both' || inputs.report_type == 'full' || inputs.report_type == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -50,6 +61,7 @@ jobs:
           python downloader.py
 
   download-and-email-107:
+    if: ${{ inputs.report_type == 'both' || inputs.report_type == '107_locations' || inputs.report_type == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
