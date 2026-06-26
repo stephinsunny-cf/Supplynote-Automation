@@ -759,40 +759,64 @@ def download_report_api(token: str, biz_id: str, version_key: str) -> bytes:
 # 7. CSV → xlsx conversion
 # ─────────────────────────────────────────────────────────────────────────────
 
-def ensure_xlsx(content: bytes, base_filename: str) -> tuple[bytes, str]:
+def process_file(content: bytes, base_filename: str) -> tuple[bytes, str]:
     """
-    If the server returned CSV instead of xlsx, convert it.
-    Detects xlsx by the PK zip magic bytes at the start.
-    Returns (file_bytes, filename).
+    Load the file (CSV or XLSX), apply location filtering if requested,
+    and return as XLSX.
     """
-    if content[:2] == b"PK":
-        log.info("File is already xlsx.")
-        return content, base_filename
-
-    log.info("File appears to be CSV — converting to xlsx...")
     try:
         import pandas as pd
 
-        for enc in ("utf-8", "utf-8-sig", "latin-1", "cp1252"):
-            try:
-                df = pd.read_csv(io.BytesIO(content), encoding=enc)
-                break
-            except UnicodeDecodeError:
-                continue
+        # 1. Load into DataFrame
+        if content[:2] == b"PK":
+            log.info("File is already xlsx. Loading into pandas...")
+            df = pd.read_excel(io.BytesIO(content))
         else:
-            raise ValueError("Could not decode CSV with any known encoding")
+            log.info("File appears to be CSV. Loading into pandas...")
+            for enc in ("utf-8", "utf-8-sig", "latin-1", "cp1252"):
+                try:
+                    df = pd.read_csv(io.BytesIO(content), encoding=enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                raise ValueError("Could not decode CSV with any known encoding")
 
+        # 2. Filter locations if requested
+        filter_file = os.environ.get("FILTER_LOCATIONS_FILE")
+        if filter_file and os.path.exists(filter_file):
+            log.info(f"Filtering locations using {filter_file}...")
+            with open(filter_file, "r") as f:
+                allowed_locations = {line.strip().lower() for line in f if line.strip()}
+            
+            # Find the location column dynamically
+            location_col = None
+            for col in df.columns:
+                if col.strip().lower() in ["outlet", "location", "business", "store", "outlet name", "location name"]:
+                    location_col = col
+                    break
+            
+            if location_col:
+                orig_len = len(df)
+                # Keep rows where location is in our list
+                df = df[df[location_col].astype(str).str.strip().str.lower().isin(allowed_locations)]
+                log.info(f"Filtered DataFrame from {orig_len} to {len(df)} rows using column '{location_col}'.")
+            else:
+                log.warning(f"Could not find a location column to filter. Available cols: {df.columns.tolist()}")
+
+        # 3. Save as XLSX
         xlsx_name = re.sub(r"\.(csv|txt)$", ".xlsx", base_filename, flags=re.IGNORECASE)
         if not xlsx_name.endswith(".xlsx"):
             xlsx_name = base_filename.rsplit(".", 1)[0] + ".xlsx"
 
         buf = io.BytesIO()
         df.to_excel(buf, index=False, engine="openpyxl")
-        log.info(f"Converted CSV ({len(content):,}B) → xlsx ({buf.tell():,}B)")
-        return buf.getvalue(), xlsx_name
+        new_content = buf.getvalue()
+        log.info(f"Processed file → {xlsx_name} ({len(new_content):,} bytes)")
+        return new_content, xlsx_name
 
     except Exception as e:
-        log.warning(f"CSV→xlsx conversion failed: {e}. Will send as original format.")
+        log.warning(f"File processing failed: {e}. Will send original format.")
         return content, base_filename
 
 
@@ -1188,15 +1212,16 @@ def main() -> None:
     # For today's report: send as CSV (smaller file, better chance of direct attachment)
     # For yesterday's report: convert to xlsx as usual
     date_tag     = display.replace("-", "")   # e.g. "26042026" from "26-04-2026"
-    csv_filename = f"All_Ingredient_Data_{date_tag}.csv"
+    file_prefix  = os.environ.get("REPORT_FILE_PREFIX", "All_Ingredient_Data")
+    csv_filename = f"{file_prefix}_{date_tag}.csv"
     skip_drive   = os.environ.get("SKIP_DRIVE_UPLOAD", "false").strip().lower() == "true"
 
     if skip_drive:
         # Convert to xlsx — keep original filename All_Ingredient_Data_* for the 11:30 AM run
-        content, filename = ensure_xlsx(content, csv_filename)
+        content, filename = process_file(content, csv_filename)
         log.info(f"File ready (xlsx): {filename} ({len(content):,} bytes)")
     else:
-        content, filename = ensure_xlsx(content, csv_filename)
+        content, filename = process_file(content, csv_filename)
         log.info(f"File ready (xlsx): {filename} ({len(content):,} bytes)")
 
     # Step 6 — Email
