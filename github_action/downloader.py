@@ -49,14 +49,17 @@ log = logging.getLogger("downloader")
 # Accepts both naming conventions:
 #   Local .env  → SUPPLYNOTE_USER / SUPPLYNOTE_PASS / SUPPLYNOTE_JWT / SUPPLYNOTE_BUSINESS_ID
 #   GitHub Secrets → SN_USERNAME / SN_PASSWORD / SN_TOKEN / SN_BUSINESS_ID
-SN_USERNAME    = (os.environ.get("SN_USERNAME", "")    or os.environ.get("SUPPLYNOTE_USER", "")).strip()
-SN_PASSWORD    = (os.environ.get("SN_PASSWORD", "")    or os.environ.get("SUPPLYNOTE_PASS", "")).strip()
-SN_TOKEN       = (os.environ.get("SN_TOKEN", "")       or os.environ.get("SUPPLYNOTE_JWT", "")).strip()
-SN_BUSINESS_ID = (os.environ.get("SN_BUSINESS_ID", "") or os.environ.get("SUPPLYNOTE_BUSINESS_ID", "")).strip()
-GMAIL_USER     = (os.environ.get("GMAIL_USER", "")     or os.environ.get("EMAIL_USER", "")).strip()
-GMAIL_APP_PASS = (os.environ.get("GMAIL_APP_PASSWORD", "") or os.environ.get("GMAIL_APP_PASS", "")).strip()
-RECIPIENT      = (os.environ.get("RECIPIENT_EMAIL", "") or os.environ.get("EMAIL_USER", "")).strip()
-DOWNLOAD_TYPE  = os.environ.get("DOWNLOAD_TYPE", "all").strip()
+def _clean_env(val: str) -> str:
+    return val.replace('\n', ' ').replace('\r', '').replace('\t', ' ').strip() if val else ""
+
+SN_USERNAME    = _clean_env(os.environ.get("SN_USERNAME", "")    or os.environ.get("SUPPLYNOTE_USER", ""))
+SN_PASSWORD    = _clean_env(os.environ.get("SN_PASSWORD", "")    or os.environ.get("SUPPLYNOTE_PASS", ""))
+SN_TOKEN       = _clean_env(os.environ.get("SN_TOKEN", "")       or os.environ.get("SUPPLYNOTE_JWT", ""))
+SN_BUSINESS_ID = _clean_env(os.environ.get("SN_BUSINESS_ID", "") or os.environ.get("SUPPLYNOTE_BUSINESS_ID", ""))
+GMAIL_USER     = _clean_env(os.environ.get("GMAIL_USER", "")     or os.environ.get("EMAIL_USER", ""))
+GMAIL_APP_PASS = _clean_env(os.environ.get("GMAIL_APP_PASSWORD", "") or os.environ.get("GMAIL_APP_PASS", ""))
+RECIPIENT      = _clean_env(os.environ.get("RECIPIENT_EMAIL", "") or os.environ.get("EMAIL_USER", ""))
+DOWNLOAD_TYPE  = _clean_env(os.environ.get("DOWNLOAD_TYPE", "all"))
 
 BASE      = "https://www.supplynote.in/api"
 JWT_RE    = re.compile(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+")
@@ -1012,9 +1015,9 @@ def _send_via_oauth2(file_bytes: bytes, filename: str, report_date: str) -> bool
     Send email using Gmail API + OAuth2 (credentials.json / token.json).
     Returns True on success, False if OAuth2 is not configured locally.
     """
-    creds_path = Path(os.environ.get("GMAIL_CREDENTIALS_PATH", "config/credentials.json").strip())
-    token_path = Path(os.environ.get("GMAIL_TOKEN_PATH",        "config/token.json").strip())
-    sender     = os.environ.get("EMAIL_USER", "").strip() or GMAIL_USER
+    creds_path = Path(_clean_env(os.environ.get("GMAIL_CREDENTIALS_PATH", "config/credentials.json")))
+    token_path = Path(_clean_env(os.environ.get("GMAIL_TOKEN_PATH",        "config/token.json")))
+    sender     = _clean_env(os.environ.get("EMAIL_USER", "")) or GMAIL_USER
 
     # Resolve paths relative to the parent of this script (project root)
     root = Path(__file__).parent.parent
@@ -1046,8 +1049,8 @@ def _send_via_oauth2(file_bytes: bytes, filename: str, report_date: str) -> bool
             log.warning("OAuth2 token invalid and cannot be refreshed.")
             return False
 
-    recipient  = os.environ.get("RECIPIENT_EMAIL", "").strip() or sender
-    skip_drive = os.environ.get("SKIP_DRIVE_UPLOAD", "false").strip().lower() == "true"
+    recipient  = _clean_env(os.environ.get("RECIPIENT_EMAIL", "")) or sender
+    skip_drive = _clean_env(os.environ.get("SKIP_DRIVE_UPLOAD", "false")).lower() == "true"
     report_title = os.environ.get("REPORT_TITLE", "SupplyNote Ingredients Report")
 
     if skip_drive:
@@ -1102,7 +1105,7 @@ def send_email(file_bytes: bytes, filename: str, report_date: str) -> None:
         return
 
     # ── Strategy 2: SMTP App Password (GitHub Actions / fallback) ────────────
-    sender    = GMAIL_USER or os.environ.get("EMAIL_USER", "").strip()
+    sender    = GMAIL_USER or _clean_env(os.environ.get("EMAIL_USER", ""))
     recipient = RECIPIENT  or sender
 
     if not sender:
