@@ -2,20 +2,9 @@ name: SupplyNote Today Ingredients Report
 
 on:
   workflow_dispatch:   # triggered by cron-job.org every 2 hours from 8 AM to 6 PM IST
-    inputs:
-      report_type:
-        description: 'Which report to run?'
-        required: true
-        default: 'both'
-        type: choice
-        options:
-          - both
-          - full
-          - 107_locations
 
 jobs:
   download-and-email:
-    if: ${{ inputs.report_type == 'both' || inputs.report_type == 'full' || inputs.report_type == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -55,54 +44,6 @@ jobs:
           DOWNLOAD_TYPE:          all
           REPORT_DATE:            today
           REPORT_TITLE:           SupplyNote Current Stock Report
-          SKIP_DRIVE_UPLOAD:      true
-        run: |
-          cd github_action
-          python downloader.py
-
-  download-and-email-107:
-    if: ${{ inputs.report_type == 'both' || inputs.report_type == '107_locations' || inputs.report_type == '' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Python dependencies
-        run: |
-          pip install -r github_action/requirements.txt
-
-      - name: Install Playwright + Chromium (fallback browser)
-        run: |
-          playwright install chromium
-          playwright install-deps chromium
-
-      - name: Write Google OAuth credentials from secrets
-        run: |
-          mkdir -p github_action/config
-          echo "${{ secrets.GMAIL_TOKEN_JSON }}"       | base64 -d > github_action/config/token.json
-          echo "${{ secrets.GMAIL_CREDENTIALS_JSON }}" | base64 -d > github_action/config/credentials.json
-
-      - name: Run downloader (107 locations)
-        env:
-          SUPPLYNOTE_USER:        ${{ secrets.SUPPLYNOTE_USER }}
-          SUPPLYNOTE_PASS:        ${{ secrets.SUPPLYNOTE_PASS }}
-          SUPPLYNOTE_BUSINESS_ID: ${{ secrets.SUPPLYNOTE_BUSINESS_ID }}
-          EMAIL_USER:             ${{ secrets.EMAIL_USER }}
-          RECIPIENT_EMAIL:        ${{ secrets.RECIPIENTS_107_LOCATIONS }}
-          GMAIL_CREDENTIALS_PATH: github_action/config/credentials.json
-          GMAIL_TOKEN_PATH:       github_action/config/token.json
-          DOWNLOAD_TYPE:          all
-          REPORT_DATE:            today
-          REPORT_TITLE:           SupplyNote Current Stock Report (107 Locations)
-          REPORT_FILE_PREFIX:     107_Locations_Ingredient_Data
-          FILTER_LOCATIONS_FILE:  107_locations.txt
           SKIP_DRIVE_UPLOAD:      true
         run: |
           cd github_action
