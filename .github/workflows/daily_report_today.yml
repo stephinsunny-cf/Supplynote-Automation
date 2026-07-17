@@ -29,8 +29,8 @@ jobs:
       - name: Write Google OAuth credentials from secrets
         run: |
           mkdir -p github_action/config
-          echo "${{ secrets.GMAIL_TOKEN_JSON }}"       | base64 -d > github_action/config/token.json
-          echo "${{ secrets.GMAIL_CREDENTIALS_JSON }}" | base64 -d > github_action/config/credentials.json
+          echo "${{ secrets.GMAIL_TOKEN_JSON }}"       | base64 -di > github_action/config/token.json
+          echo "${{ secrets.GMAIL_CREDENTIALS_JSON }}" | base64 -di > github_action/config/credentials.json
 
       - name: Run downloader (today's report)
         env:
