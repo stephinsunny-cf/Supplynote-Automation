@@ -471,7 +471,7 @@ def download_via_playwright(biz_id: str, today_ist: datetime, version_key: str =
             page.fill('input[type="password"]', password)
             page.press('input[type="password"]', 'Enter')
             try:
-                page.click('button[type="submit"], button:has-text("Login"), button:has-text("Sign in"), button:has-text("SIGN IN")', timeout=5000)
+                page.click('button[type="submit"], button:has-text("Login"), button:has-text("Log in"), button:has-text("Sign in"), button:has-text("SIGN IN"), button[ng-click*="signin"]', timeout=5000)
             except Exception:
                 pass
 
