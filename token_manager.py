@@ -282,7 +282,11 @@ async def _browser_login() -> str | None:
                 pass
 
         await page.fill('input[type="password"]', SUPPLYNOTE_PASS)
-        await page.click('button[type="submit"]')
+        await page.press('input[type="password"]', 'Enter')
+        try:
+            await page.click('button[type="submit"], button:has-text("Login"), button:has-text("Sign In"), button:has-text("SIGN IN")', timeout=5000)
+        except Exception:
+            pass
         await page.wait_for_timeout(5000)
         await browser.close()
 

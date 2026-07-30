@@ -469,7 +469,11 @@ def download_via_playwright(biz_id: str, today_ist: datetime, version_key: str =
                 username,
             )
             page.fill('input[type="password"]', password)
-            page.click('button[type="submit"]')
+            page.press('input[type="password"]', 'Enter')
+            try:
+                page.click('button[type="submit"], button:has-text("Login"), button:has-text("Sign in"), button:has-text("SIGN IN")', timeout=5000)
+            except Exception:
+                pass
 
             # Wait for URL to leave /signin — confirms successful login
             try:
