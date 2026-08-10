@@ -161,10 +161,14 @@ def login() -> str:
             "Set either SN_TOKEN (existing JWT) or both SN_USERNAME + SN_PASSWORD."
         )
 
+    # HAR confirmed: correct login endpoint is POST /api/auth/signin
+    # with body {"username": ..., "password": ...}
     login_urls = [
-        "https://www.supplynote.in/api/auth/signin",
+        "https://www.supplynote.in/api/auth/signin",   # ← confirmed working from HAR
         "https://www.supplynote.in/api/auth/login",
         "https://www.supplynote.in/api/v1/auth/login",
+        "https://www.supplynote.in/api/users/login",
+        "https://www.supplynote.in/api/signin",
     ]
     body_variants = [
         {"username": SN_USERNAME, "password": SN_PASSWORD},
@@ -1376,17 +1380,31 @@ def main() -> None:
     log.info(f"Version key : {version_key}")
     log.info(f"Actual report date : {display}")
 
-    # Step 5 — Download via API (semiFinished-combined endpoint → S3 link)
-    # HAR analysis confirmed: the correct endpoint returns an S3 URL instantly.
-    # No Playwright needed — pure API download works reliably.
+    # Step 5 — Download the report
+    # Strategy order (fastest/most reliable first):
+    #   A. sheetUploadLink  — direct S3 URL already in history response (HAR confirmed)
+    #   B. download_report_api  — /download/semiFinished-combined (often times out)
+    #   C. Playwright browser automation  — full UI fallback
     log.info("--- Step 4/5: Download ---")
     content = None
 
+    # Strategy A: sheetUploadLink (direct S3, no server-side generation needed)
     try:
-        content = download_report_api(token, biz_id, version_key)
-        log.info("[API] Download succeeded.")
-    except Exception as api_err:
-        log.warning(f"[API] Download failed: {api_err}")
+        content = download_from_sheet_link(latest)
+        log.info("[SheetLink] Strategy A succeeded.")
+    except Exception as sl_err:
+        log.warning(f"[SheetLink] Strategy A failed: {sl_err}")
+
+    # Strategy B: /download/semiFinished-combined API endpoint
+    if content is None:
+        try:
+            content = download_report_api(token, biz_id, version_key)
+            log.info("[API] Strategy B succeeded.")
+        except Exception as api_err:
+            log.warning(f"[API] Strategy B failed: {api_err}")
+
+    # Strategy C: Playwright full browser automation
+    if content is None:
         log.info("[Browser] Falling back to Playwright browser automation...")
         content = download_via_playwright(biz_id, today_ist, version_key)
 
