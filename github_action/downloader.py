@@ -604,8 +604,6 @@ def download_via_playwright(biz_id: str, today_ist: datetime, version_key: str =
 
             # ── Step 4: Click INGREDIENTS tab ────────────────────────────────
             log.info("[Browser] Clicking INGREDIENTS tab...")
-            # Tabs show as "MENU" | "INGREDIENTS" | "PRODUCTION PLANS"
-            # Use Playwright locator with exact text (uppercase as shown in UI)
             for tab_text in ["INGREDIENTS", "Ingredients", "INGREDIENT"]:
                 try:
                     tab = page.get_by_text(tab_text, exact=True)
@@ -620,8 +618,6 @@ def download_via_playwright(biz_id: str, today_ist: datetime, version_key: str =
             _screenshot(today_ist.strftime("%Y%m%d") + "_ingredients_tab")
 
             # ── Safety: Disable "Sync with Production" button ─────────────────
-            # This button must NEVER be clicked by automation — it overwrites
-            # production data. We disable it in the DOM before doing anything else.
             page.evaluate("""() => {
                 const els = Array.from(document.querySelectorAll('button, md-button, a'));
                 els.forEach(el => {
@@ -635,82 +631,213 @@ def download_via_playwright(biz_id: str, today_ist: datetime, version_key: str =
             }""")
             log.info("[Browser] 'Sync with Production' button disabled for safety.")
 
-            # ── Step 5: Use in-browser fetch() to get the S3 download link ────
-            # Instead of clicking the dropdown menu (unreliable in headless mode),
-            # we run a fetch() call directly inside the browser page.
-            # The browser already has all session cookies set from login, so
-            # this call is authenticated automatically — no JWT header needed.
-            log.info("[Browser] Using in-browser fetch() to get S3 download link...")
+            # ── Step 5: Download the report — three layered strategies ───────────
+            #
+            # Strategy A: Click the "All Ingredient Data" download button in the UI
+            #   and capture the resulting file via Playwright's native download handler.
+            #
+            # Strategy B: Extract a pre-signed S3 URL from the Angular controller scope.
+            #
+            # Strategy C: In-browser fetch() with JS AbortController timeout.
+            #   NOTE: page.evaluate() does NOT accept a timeout kwarg — use
+            #   page.set_default_timeout() + AbortController inside JS instead.
+            #
+            import tempfile, os as _os
 
-            # Retry the in-browser fetch up to 3 times — the server can return
-            # "upstream request timeout" (not valid JSON) under load.
-            fetch_max = 3
-            s3_url = None
-            for fetch_attempt in range(1, fetch_max + 1):
-                log.info(f"[Browser] fetch() attempt {fetch_attempt}/{fetch_max}...")
-                # Raise evaluate timeout to 3 min to give the server time to respond
-                raw_result = page.evaluate(
-                    f"""async () => {{
-                        const url = '/api/demandplan/download/semiFinished-combined?type=all&versionKey={version_key}';
-                        try {{
-                            const resp = await fetch(url, {{
-                                method: 'GET',
-                                credentials: 'include',
-                                headers: {{ 'Accept': 'application/json' }}
-                            }});
-                            const text = await resp.text();
+            content_bytes: bytes | None = None
+
+
+            # ── Strategy A: Native button-click download ──────────────────────
+            log.info("[Browser] Strategy A: clicking download button in UI...")
+            try:
+                # Open the download dropdown (look for various selectors)
+                dropdown_opened = False
+                for sel in [
+                    'button:has-text("Download")',
+                    'md-button:has-text("Download")',
+                    'button:has-text("Export")',
+                    '[ng-click*="download" i]',
+                    '[ng-click*="export" i]',
+                ]:
+                    try:
+                        el = page.locator(sel)
+                        if el.count() > 0:
+                            el.first.click(force=True)
+                            page.wait_for_timeout(1_500)
+                            log.info(f"[Browser] Opened download dropdown: {sel}")
+                            dropdown_opened = True
+                            break
+                    except Exception:
+                        continue
+
+                if dropdown_opened:
+                    for sel in [
+                        'md-menu-item:has-text("All Ingredient")',
+                        'button:has-text("All Ingredient")',
+                        'a:has-text("All Ingredient")',
+                        '[role="menuitem"]:has-text("All Ingredient")',
+                        '*:has-text("All Ingredient Data")',
+                    ]:
+                        try:
+                            el = page.locator(sel)
+                            if el.count() > 0:
+                                log.info(f"[Browser] Clicking download option: {sel}")
+                                with page.expect_download(timeout=300_000) as dl_info:
+                                    el.first.click(force=True)
+                                dl = dl_info.value
+                                tmp_path = tempfile.mktemp(suffix=".csv")
+                                dl.save_as(tmp_path)
+                                with open(tmp_path, "rb") as fh:
+                                    content_bytes = fh.read()
+                                try:
+                                    _os.unlink(tmp_path)
+                                except Exception:
+                                    pass
+                                if content_bytes and len(content_bytes) > 100:
+                                    log.info(f"[Browser] Strategy A succeeded: {len(content_bytes):,} bytes")
+                                    return content_bytes
+                                else:
+                                    log.warning("[Browser] Strategy A: downloaded file is empty, trying next strategy.")
+                                    content_bytes = None
+                                break
+                        except Exception as btn_e:
+                            log.warning(f"[Browser] Strategy A click {sel} failed: {btn_e}")
+                            continue
+                else:
+                    log.warning("[Browser] Strategy A: could not open download dropdown, skipping.")
+            except Exception as e:
+                log.warning(f"[Browser] Strategy A failed: {e}")
+
+            # ── Strategy B: Extract S3 URL from Angular scope ─────────────────
+            if content_bytes is None:
+                log.info("[Browser] Strategy B: extracting S3 URL from Angular scope/DOM...")
+                try:
+                    scope_url = page.evaluate("""() => {
+                        try {
+                            // Walk Angular scopes looking for S3/download URLs
+                            function walk(scope) {
+                                if (!scope) return null;
+                                for (const key of Object.keys(scope)) {
+                                    if (key.startsWith('$') || key.startsWith('_')) continue;
+                                    const val = scope[key];
+                                    if (typeof val === 'string' && val.includes('s3') && val.includes('http')) return val;
+                                    if (typeof val === 'string' && val.includes('amazonaws') && val.startsWith('http')) return val;
+                                }
+                                return walk(scope.$$childHead) || walk(scope.$$nextSibling);
+                            }
+                            const rootEl = document.querySelector('[ng-app], [data-ng-app]') ||
+                                           document.querySelector('[ng-controller]') ||
+                                           document.body;
+                            if (window.angular) {
+                                const s = angular.element(rootEl).scope();
+                                const found = walk(s);
+                                if (found) return found;
+                            }
+                            // Also scan all anchor hrefs for S3 URLs
+                            for (const a of document.querySelectorAll('a[href]')) {
+                                if (a.href.includes('s3') || a.href.includes('amazonaws')) return a.href;
+                            }
+                        } catch(e) {}
+                        return null;
+                    }""")
+                    if scope_url and scope_url.startswith("http"):
+                        log.info(f"[Browser] Strategy B found URL: {scope_url[:80]}...")
+                        import requests as _req
+                        r_s = _req.get(scope_url, timeout=(30, 300), stream=True)
+                        r_s.raise_for_status()
+                        chunks, total = [], 0
+                        for chunk in r_s.iter_content(chunk_size=65536):
+                            if chunk:
+                                chunks.append(chunk)
+                                total += len(chunk)
+                        content_bytes = b"".join(chunks)
+                        if content_bytes and len(content_bytes) > 100:
+                            log.info(f"[Browser] Strategy B succeeded: {len(content_bytes):,} bytes")
+                            return content_bytes
+                        content_bytes = None
+                    else:
+                        log.warning("[Browser] Strategy B: no S3 URL found in Angular scope.")
+                except Exception as e:
+                    log.warning(f"[Browser] Strategy B failed: {e}")
+
+            # ── Strategy C: In-browser fetch() with JS AbortController timeout ─
+            # NOTE: page.evaluate() does NOT accept a timeout kwarg in Playwright
+            # Python. Use page.set_default_timeout() + an AbortController in JS.
+            if content_bytes is None:
+                log.info("[Browser] Strategy C: in-browser fetch() to download endpoint...")
+                fetch_max = 3
+                s3_url: str | None = None
+                raw_result: str = ""
+                for fetch_attempt in range(1, fetch_max + 1):
+                    log.info(f"[Browser] Strategy C fetch attempt {fetch_attempt}/{fetch_max}...")
+                    page.set_default_timeout(180_000)   # 3 minutes for this evaluate
+                    try:
+                        raw_result = page.evaluate(f"""async () => {{
+                            const TIMEOUT_MS = 170000;
+                            const controller = new AbortController();
+                            const tid = setTimeout(() => controller.abort(), TIMEOUT_MS);
+                            const url = '/api/demandplan/download/semiFinished-combined?type=all&versionKey={version_key}';
                             try {{
-                                const body = JSON.parse(text);
-                                return body.data || body.url || body.fileUrl || body.download_url || JSON.stringify(body);
-                            }} catch(_) {{
-                                // Server returned non-JSON (e.g. "upstream request timeout")
-                                return 'server_error: ' + text.substring(0, 200);
+                                const resp = await fetch(url, {{
+                                    method: 'GET',
+                                    signal: controller.signal,
+                                    credentials: 'include',
+                                    headers: {{ 'Accept': 'application/json' }}
+                                }});
+                                clearTimeout(tid);
+                                const text = await resp.text();
+                                try {{
+                                    const body = JSON.parse(text);
+                                    return body.data || body.url || body.fileUrl || body.download_url || JSON.stringify(body);
+                                }} catch(_) {{
+                                    return 'server_error: ' + text.substring(0, 300);
+                                }}
+                            }} catch(e) {{
+                                clearTimeout(tid);
+                                return 'fetch_error: ' + e.message;
                             }}
-                        }} catch(e) {{
-                            return 'fetch_error: ' + e.message;
-                        }}
-                    }}""",
-                    timeout=180_000,   # 3 minutes
-                )
-                log.info(f"[Browser] fetch() result: {str(raw_result)[:150]}")
+                        }}""")
+                    finally:
+                        page.set_default_timeout(30_000)   # reset to default
 
-                if raw_result and isinstance(raw_result, str) and \
-                        not raw_result.startswith('fetch_error') and \
-                        not raw_result.startswith('server_error') and \
-                        not raw_result.startswith('{'):
-                    s3_url = raw_result
-                    break
+                    log.info(f"[Browser] Strategy C result: {str(raw_result)[:150]}")
 
-                # Transient server error — wait and retry
-                if fetch_attempt < fetch_max:
-                    wait_secs = 30 * fetch_attempt
-                    log.warning(
-                        f"[Browser] fetch() attempt {fetch_attempt} failed "
-                        f"(server error or timeout). Waiting {wait_secs}s before retry..."
+                    if raw_result and isinstance(raw_result, str) and \
+                            not raw_result.startswith('fetch_error') and \
+                            not raw_result.startswith('server_error') and \
+                            not raw_result.startswith('{'):
+                        s3_url = raw_result
+                        break
+
+                    if fetch_attempt < fetch_max:
+                        wait_secs = 30 * fetch_attempt
+                        log.warning(
+                            f"[Browser] Strategy C attempt {fetch_attempt} got server error. "
+                            f"Waiting {wait_secs}s before retry..."
+                        )
+                        page.wait_for_timeout(wait_secs * 1_000)
+
+                if s3_url:
+                    log.info(f"[Browser] Downloading from S3: {s3_url[:80]}...")
+                    import requests as _req
+                    r2 = _req.get(s3_url, timeout=(30, 300), stream=True)
+                    r2.raise_for_status()
+                    chunks, total = [], 0
+                    for chunk in r2.iter_content(chunk_size=65536):
+                        if chunk:
+                            chunks.append(chunk)
+                            total += len(chunk)
+                            if total % (20 * 1024 * 1024) < 65536:
+                                log.info(f"[Browser] Downloaded {total / 1024 / 1024:.0f} MB...")
+                    content_bytes = b"".join(chunks)
+                    log.info(f"[Browser] Strategy C file size: {len(content_bytes):,} bytes")
+                    return content_bytes
+                else:
+                    raise RuntimeError(
+                        f"[Browser] All 3 strategies failed to obtain a download. "
+                        f"Last fetch result: {str(raw_result)[:300]}"
                     )
-                    page.wait_for_timeout(wait_secs * 1000)
 
-            if not s3_url:
-                raise RuntimeError(
-                    f"[Browser] fetch() did not return S3 URL after {fetch_max} attempts. "
-                    f"Last result: {str(raw_result)[:200]}"
-                )
-
-            # Download the CSV directly from S3 using requests (no auth needed for S3)
-            log.info(f"[Browser] Downloading from S3: {s3_url[:80]}...")
-            import requests as _req
-            r2 = _req.get(s3_url, timeout=(30, 300), stream=True)
-            r2.raise_for_status()
-            chunks, total = [], 0
-            for chunk in r2.iter_content(chunk_size=65536):
-                if chunk:
-                    chunks.append(chunk)
-                    total += len(chunk)
-                    if total % (20 * 1024 * 1024) < 65536:
-                        log.info(f"[Browser] Downloaded {total / 1024 / 1024:.0f} MB...")
-            content = b"".join(chunks)
-            log.info(f"[Browser] File size: {len(content):,} bytes")
-            return content
 
         except Exception as e:
             _screenshot(today_ist.strftime("%Y%m%d_%H%M%S") + "_error")
