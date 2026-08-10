@@ -314,62 +314,64 @@ def fetch_latest_version(token: str, biz_id: str, plan_date: str) -> tuple[dict,
             display = plan_date[:10]
         return v, display
 
-    # ── Attempt 2: no data for that date — fetch most recent PAST entry ─────────
+    # ── Attempt 2: no data for that date — walk backwards over recent days ───────
     # IMPORTANT: Never return today's data. We always want a past day's report.
+    # NOTE: The API requires planDate — calling without it returns 400.
+    #       So we probe up to 14 past days (skipping today) until we find data.
     log.warning(
         f"No data found for {plan_date[:10]} (possibly a holiday/Sunday). "
-        "Fetching most recently uploaded past entry (excluding today)..."
+        "Walking backwards over past 14 days to find most recent entry..."
     )
-    fallback_url = f"{BASE}/demandplan/history/semiFinished?business={biz_id}"
-    log.info(f"Fallback history URL: {fallback_url}")
-    res2 = requests.get(fallback_url, headers=headers, timeout=30)
-    res2.raise_for_status()
-
-    all_versions = _parse_versions(res2.json())
-
-    if not all_versions:
-        raise RuntimeError(
-            "No Ingredients demand plan entries found at all.\n"
-            "Make sure at least one demand plan has been uploaded on SupplyNote."
-        )
-
-    # Sort by planDate descending
-    def _sort_key(v):
-        return v.get("planDate") or v.get("plan_date") or ""
-    all_versions.sort(key=_sort_key, reverse=True)
-
-    # Get today's date in IST — we must NEVER pick today's entry
     IST = timezone(timedelta(hours=5, minutes=30))
     today_ist_date = datetime.now(IST).date()
-    log.info(f"Today in IST: {today_ist_date} — will skip any entry matching this date")
 
     chosen = None
-    for v in all_versions:
-        raw_date = v.get("planDate") or v.get("plan_date") or ""
+    display = None
+
+    for days_back in range(1, 15):
+        candidate_date = today_ist_date - timedelta(days=days_back)
+        # Build planDate in the same UTC ISO format the API expects
+        # (midnight IST = 18:30 previous UTC day)
+        candidate_utc = datetime(
+            candidate_date.year, candidate_date.month, candidate_date.day,
+            0, 0, 0, tzinfo=IST
+        ).astimezone(timezone.utc)
+        candidate_plan_date = candidate_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        probe_url = (
+            f"{BASE}/demandplan/history/semiFinished"
+            f"?business={biz_id}&planDate={requests.utils.quote(candidate_plan_date)}"
+        )
+        log.info(f"Fallback probe [{days_back}/14]: {probe_url}")
         try:
-            dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
-            entry_date = dt.astimezone(IST).date()
-            if entry_date < today_ist_date:
-                chosen = v
-                log.info(f"Fallback: found past entry — plan date {entry_date}")
-                break
-            else:
-                log.info(f"Fallback: skipping today's entry ({entry_date})")
-        except Exception:
+            res2 = requests.get(probe_url, headers=headers, timeout=30)
+            if res2.status_code == 400:
+                log.warning(f"  400 for {candidate_date}, skipping.")
+                continue
+            res2.raise_for_status()
+        except requests.exceptions.HTTPError as exc:
+            log.warning(f"  HTTP error for {candidate_date}: {exc}, skipping.")
             continue
+
+        versions = _parse_versions(res2.json())
+        if versions:
+            chosen = versions[0]
+            log.info(f"Fallback: found entry for {candidate_date}")
+            raw_date = chosen.get("planDate") or chosen.get("plan_date") or candidate_plan_date
+            try:
+                dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+                display = dt.astimezone(IST).strftime("%d-%m-%Y")
+            except Exception:
+                display = str(candidate_date)
+            break
+        else:
+            log.info(f"  No data for {candidate_date}, trying further back.")
 
     if chosen is None:
         raise RuntimeError(
-            "No past demand plan entries found (all entries are from today or undated).\n"
-            "Please make sure historical data is available on SupplyNote."
+            "No past demand plan entries found in the last 14 days.\n"
+            "Make sure at least one demand plan has been uploaded on SupplyNote."
         )
-
-    raw_date = chosen.get("planDate") or chosen.get("plan_date") or ""
-    try:
-        dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
-        display = dt.astimezone(IST).strftime("%d-%m-%Y")
-    except Exception:
-        display = raw_date[:10]
 
     log.info(f"Fallback: using entry — plan date {display}")
     return chosen, display
@@ -640,25 +642,59 @@ def download_via_playwright(biz_id: str, today_ist: datetime, version_key: str =
             # this call is authenticated automatically — no JWT header needed.
             log.info("[Browser] Using in-browser fetch() to get S3 download link...")
 
-            s3_url = page.evaluate(f"""async () => {{
-                const url = '/api/demandplan/download/semiFinished-combined?type=all&versionKey={version_key}';
-                try {{
-                    const resp = await fetch(url, {{
-                        method: 'GET',
-                        credentials: 'include',
-                        headers: {{ 'Accept': 'application/json' }}
-                    }});
-                    const body = await resp.json();
-                    return body.data || body.url || body.fileUrl || body.download_url || JSON.stringify(body);
-                }} catch(e) {{
-                    return 'fetch_error: ' + e.message;
-                }}
-            }}""")
+            # Retry the in-browser fetch up to 3 times — the server can return
+            # "upstream request timeout" (not valid JSON) under load.
+            fetch_max = 3
+            s3_url = None
+            for fetch_attempt in range(1, fetch_max + 1):
+                log.info(f"[Browser] fetch() attempt {fetch_attempt}/{fetch_max}...")
+                # Raise evaluate timeout to 3 min to give the server time to respond
+                raw_result = page.evaluate(
+                    f"""async () => {{
+                        const url = '/api/demandplan/download/semiFinished-combined?type=all&versionKey={version_key}';
+                        try {{
+                            const resp = await fetch(url, {{
+                                method: 'GET',
+                                credentials: 'include',
+                                headers: {{ 'Accept': 'application/json' }}
+                            }});
+                            const text = await resp.text();
+                            try {{
+                                const body = JSON.parse(text);
+                                return body.data || body.url || body.fileUrl || body.download_url || JSON.stringify(body);
+                            }} catch(_) {{
+                                // Server returned non-JSON (e.g. "upstream request timeout")
+                                return 'server_error: ' + text.substring(0, 200);
+                            }}
+                        }} catch(e) {{
+                            return 'fetch_error: ' + e.message;
+                        }}
+                    }}""",
+                    timeout=180_000,   # 3 minutes
+                )
+                log.info(f"[Browser] fetch() result: {str(raw_result)[:150]}")
 
-            log.info(f"[Browser] fetch() result: {str(s3_url)[:120]}")
+                if raw_result and isinstance(raw_result, str) and \
+                        not raw_result.startswith('fetch_error') and \
+                        not raw_result.startswith('server_error') and \
+                        not raw_result.startswith('{'):
+                    s3_url = raw_result
+                    break
 
-            if not s3_url or not isinstance(s3_url, str) or s3_url.startswith('fetch_error') or s3_url.startswith('{'):
-                raise RuntimeError(f"[Browser] fetch() did not return S3 URL: {s3_url}")
+                # Transient server error — wait and retry
+                if fetch_attempt < fetch_max:
+                    wait_secs = 30 * fetch_attempt
+                    log.warning(
+                        f"[Browser] fetch() attempt {fetch_attempt} failed "
+                        f"(server error or timeout). Waiting {wait_secs}s before retry..."
+                    )
+                    page.wait_for_timeout(wait_secs * 1000)
+
+            if not s3_url:
+                raise RuntimeError(
+                    f"[Browser] fetch() did not return S3 URL after {fetch_max} attempts. "
+                    f"Last result: {str(raw_result)[:200]}"
+                )
 
             # Download the CSV directly from S3 using requests (no auth needed for S3)
             log.info(f"[Browser] Downloading from S3: {s3_url[:80]}...")
@@ -700,10 +736,9 @@ def download_report_api(token: str, biz_id: str, version_key: str) -> bytes:
          → Returns JSON: {"error": false, "data": "https://s3.amazonaws.com/....csv"}
       2. Download the CSV directly from the S3 URL (fast, no 504 issues).
 
-    The old endpoint (/download/semiFinished) caused 504 Gateway Timeout.
-    The correct endpoint (/download/semiFinished-combined) responds in <1s with an S3 link.
+    Retries up to 3 times with exponential back-off (15 s → 30 s → 60 s) to
+    handle transient gateway timeouts from the SupplyNote backend.
     """
-    # Step 1: Ask SupplyNote for the S3 download link
     url = (
         f"{BASE}/demandplan/download/semiFinished-combined"
         f"?type={DOWNLOAD_TYPE}&versionKey={requests.utils.quote(version_key)}"
@@ -718,48 +753,84 @@ def download_report_api(token: str, biz_id: str, version_key: str) -> bytes:
         "Referer": "https://www.supplynote.in/",
     }
 
-    log.info(f"[API] Requesting download link: {url}")
-    try:
-        res = requests.get(url, headers=headers, timeout=(15, 120))
-        res.raise_for_status()
+    max_attempts = 3
+    backoff_seconds = [15, 30, 60]  # waits before attempt 2, 3, and giving up
 
-        body = res.json()
-        # Response shape: {"error": false, "message": "...", "data": "<s3-url>"}
-        # "data" is a plain string URL (not a nested dict)
-        s3_url = body.get("data")
-        if not s3_url or not isinstance(s3_url, str):
-            # Fallback: check other common fields
-            s3_url = (
-                body.get("url") or body.get("download_url") or
-                body.get("fileUrl") or body.get("link")
-            )
-        if not s3_url:
-            raise RuntimeError(f"No download URL in API response: {str(body)[:300]}")
+    last_error: Exception = RuntimeError("No attempts made")
+    for attempt in range(1, max_attempts + 1):
+        log.info(f"[API] Requesting download link (attempt {attempt}/{max_attempts}): {url}")
+        try:
+            res = requests.get(url, headers=headers, timeout=(15, 120))
+            res.raise_for_status()
 
-        log.info(f"[API] Got S3 link: {s3_url[:80]}...")
+            # Try JSON parse; if server returned upstream-error text, surface it clearly
+            try:
+                body = res.json()
+            except ValueError:
+                raw = res.text[:200]
+                raise RuntimeError(f"Non-JSON response from download endpoint: {raw!r}")
 
-        # Step 2: Download the actual CSV from S3 (direct, no auth needed)
-        log.info(f"[API] Downloading CSV from S3...")
-        r2 = requests.get(s3_url, timeout=(30, 300), stream=True)
-        r2.raise_for_status()
+            # Response shape: {"error": false, "message": "...", "data": "<s3-url>"}
+            s3_url = body.get("data")
+            if not s3_url or not isinstance(s3_url, str):
+                s3_url = (
+                    body.get("url") or body.get("download_url") or
+                    body.get("fileUrl") or body.get("link")
+                )
+            if not s3_url:
+                raise RuntimeError(f"No download URL in API response: {str(body)[:300]}")
 
-        chunks, total = [], 0
-        for chunk in r2.iter_content(chunk_size=65536):
-            if chunk:
-                chunks.append(chunk)
-                total += len(chunk)
-                if total % (10 * 1024 * 1024) < 65536:   # log every ~10 MB
-                    log.info(f"[API] Downloaded {total / 1024 / 1024:.0f} MB so far...")
+            log.info(f"[API] Got S3 link: {s3_url[:80]}...")
 
-        if total == 0:
-            raise RuntimeError("S3 returned empty file")
+            # Step 2: Download the actual file from S3 (direct, no auth needed)
+            log.info("[API] Downloading file from S3...")
+            r2 = requests.get(s3_url, timeout=(30, 300), stream=True)
+            r2.raise_for_status()
 
-        log.info(f"[API] Download complete: {total:,} bytes ({total / 1024 / 1024:.1f} MB)")
-        return b"".join(chunks)
+            chunks, total = [], 0
+            for chunk in r2.iter_content(chunk_size=65536):
+                if chunk:
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    if total % (10 * 1024 * 1024) < 65536:
+                        log.info(f"[API] Downloaded {total / 1024 / 1024:.0f} MB so far...")
 
-    except requests.HTTPError as e:
-        status = e.response.status_code if e.response else "?"
-        raise RuntimeError(f"API download HTTP {status}: {e}") from e
+            if total == 0:
+                raise RuntimeError("S3 returned empty file")
+
+            log.info(f"[API] Download complete: {total:,} bytes ({total / 1024 / 1024:.1f} MB)")
+            return b"".join(chunks)
+
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+            last_error = e
+            if attempt < max_attempts:
+                wait = backoff_seconds[attempt - 1]
+                log.warning(f"[API] Attempt {attempt} timed out: {e}. Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                log.warning(f"[API] All {max_attempts} attempts timed out.")
+
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response else "?"
+            # Retry on 5xx gateway errors; give up immediately on 4xx
+            last_error = RuntimeError(f"API download HTTP {status}: {e}")
+            if status and int(status) >= 500 and attempt < max_attempts:
+                wait = backoff_seconds[attempt - 1]
+                log.warning(f"[API] HTTP {status} on attempt {attempt}. Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                raise last_error from e
+
+        except RuntimeError as e:
+            last_error = e
+            if attempt < max_attempts:
+                wait = backoff_seconds[attempt - 1]
+                log.warning(f"[API] Attempt {attempt} failed: {e}. Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                log.warning(f"[API] All {max_attempts} attempts failed.")
+
+    raise RuntimeError(f"[API] Download failed after {max_attempts} attempts. Last error: {last_error}") from last_error
 
 
 # ─────────────────────────────────────────────────────────────────────────────
