@@ -382,7 +382,7 @@ def fetch_latest_version(token: str, biz_id: str, plan_date: str) -> tuple[dict,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. Download via Playwright (primary — bypasses 504)
+# 5b. Download via Playwright (full browser — last resort)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def download_via_playwright(biz_id: str, today_ist: datetime, version_key: str = "") -> bytes:
@@ -391,10 +391,17 @@ def download_via_playwright(biz_id: str, today_ist: datetime, version_key: str =
     and download the All Ingredient Data report.
 
     Flow: /signin → dismiss modal → demand plan sidebar → set date (md-datepicker)
-          → Ingredients tab → All Ingredient Data → Download → capture file.
+          → Ingredients tab → click ↓ download icon → "All Ingredient Data" menu item
+          → capture file download.
 
-    Uses the correct AngularJS patterns discovered from playwright_script.py.
+    Angular template analysis (from HAR) confirmed the exact selectors:
+      - Download icon: md-button[ng-click="$mdMenu.open()"] with .material-symbols-outlined "download"
+      - Menu item: md-button with ng-click="vm.downloadSemiFinishedDemandHistoryCombined(..., 'all')"
+      - Text: "All Ingredient Data"
+
+    Alternatively, call the Angular controller function directly via JS evaluation.
     """
+
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
     except ImportError:
@@ -419,7 +426,11 @@ def download_via_playwright(biz_id: str, today_ist: datetime, version_key: str =
     log.info(f"[Browser] Starting Playwright download for {date_display}...")
 
     with sync_playwright() as p:
+        # Launch Edge, not Chromium — SupplyNote's legacy AngularJS/ui-router
+        # frontend breaks on recent Chromium (confirmed: works on Chrome 133,
+        # fails on Chrome 151 with "Invalid state ref ''"). Edge doesn't hit it.
         browser = p.chromium.launch(
+            channel="msedge",
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         )
@@ -429,7 +440,7 @@ def download_via_playwright(biz_id: str, today_ist: datetime, version_key: str =
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
+                "Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0"
             ),
         )
         page = context.new_page()
@@ -635,82 +646,150 @@ def download_via_playwright(biz_id: str, today_ist: datetime, version_key: str =
             }""")
             log.info("[Browser] 'Sync with Production' button disabled for safety.")
 
-            # ── Step 5: Download the report — three layered strategies ───────────
+            # ── Step 5: Download the report — layered strategies ─────────────────
             #
-            # Strategy A: Click the "All Ingredient Data" download button in the UI
-            #   and capture the resulting file via Playwright's native download handler.
+            # Angular template analysis (from HAR) confirmed:
+            #   - The download icon is: md-button ng-click="$mdMenu.open()" containing
+            #     span.material-symbols-outlined with text "download" (NOT a text button)
+            #   - "All Ingredient Data" calls:
+            #     vm.downloadSemiFinishedDemandHistoryCombined(item.versionKey, item, 'all')
+            #     which hits: GET /api/demandplan/download/semiFinished-combined?type=all&versionKey=...
             #
-            # Strategy B: Extract a pre-signed S3 URL from the Angular controller scope.
-            #
-            # Strategy C: In-browser fetch() with JS AbortController timeout.
-            #   NOTE: page.evaluate() does NOT accept a timeout kwarg — use
-            #   page.set_default_timeout() + AbortController inside JS instead.
+            # Strategy A0: Call the Angular controller function directly via JS to intercept
+            #   the XHR response before it's sent to the browser for file download.
+            # Strategy A1: Click the actual md-menu download icon then the menu item.
+            # Strategy B:  Extract S3 URL from Angular scope/DOM.
+            # Strategy C:  In-browser fetch() with JS AbortController timeout.
             #
             import tempfile, os as _os
 
             content_bytes: bytes | None = None
 
-
-            # ── Strategy A: Native button-click download ──────────────────────
-            log.info("[Browser] Strategy A: clicking download button in UI...")
+            # ── Strategy A0: Intercept via Angular controller + XHR ──────────────
+            # The Angular vm.downloadSemiFinishedDemandHistoryCombined() calls the
+            # same endpoint but via $http. We intercept the network response instead
+            # of going through the file download mechanism.
+            log.info("[Browser] Strategy A0: intercepting XHR via Angular controller call...")
             try:
-                # Open the download dropdown (look for various selectors)
-                dropdown_opened = False
-                for sel in [
-                    'button:has-text("Download")',
-                    'md-button:has-text("Download")',
-                    'button:has-text("Export")',
-                    '[ng-click*="download" i]',
-                    '[ng-click*="export" i]',
-                ]:
-                    try:
-                        el = page.locator(sel)
-                        if el.count() > 0:
-                            el.first.click(force=True)
-                            page.wait_for_timeout(1_500)
-                            log.info(f"[Browser] Opened download dropdown: {sel}")
-                            dropdown_opened = True
-                            break
-                    except Exception:
-                        continue
+                page.set_default_timeout(180_000)
+                try:
+                    a0_result = page.evaluate(f"""async () => {{
+                        const TIMEOUT_MS = 170000;
+                        const controller = new AbortController();
+                        const tid = setTimeout(() => controller.abort(), TIMEOUT_MS);
+                        // Call the download endpoint the same way Angular does
+                        const url = '/api/demandplan/download/semiFinished-combined?type=all&versionKey={version_key}';
+                        try {{
+                            const resp = await fetch(url, {{
+                                method: 'GET',
+                                signal: controller.signal,
+                                credentials: 'include',
+                                headers: {{ 'Accept': 'application/json' }}
+                            }});
+                            clearTimeout(tid);
+                            const text = await resp.text();
+                            try {{
+                                const body = JSON.parse(text);
+                                // The response contains a pre-signed S3 URL
+                                return body.data || body.url || body.fileUrl || body.download_url || JSON.stringify(body);
+                            }} catch(_) {{
+                                return 'server_error: ' + text.substring(0, 300);
+                            }}
+                        }} catch(e) {{
+                            clearTimeout(tid);
+                            return 'fetch_error: ' + e.message;
+                        }}
+                    }}""")
+                finally:
+                    page.set_default_timeout(30_000)
 
-                if dropdown_opened:
+                log.info(f"[Browser] Strategy A0 result: {str(a0_result)[:120]}")
+                if a0_result and isinstance(a0_result, str) and \
+                        a0_result.startswith("http") and "s3" in a0_result.lower():
+                    # Got S3 URL — download it
+                    import requests as _req
+                    log.info(f"[Browser] Strategy A0: downloading from S3: {a0_result[:80]}...")
+                    r_a0 = _req.get(a0_result, timeout=(30, 300), stream=True)
+                    r_a0.raise_for_status()
+                    chunks, total = [], 0
+                    for chunk in r_a0.iter_content(chunk_size=65536):
+                        if chunk:
+                            chunks.append(chunk)
+                            total += len(chunk)
+                    content_bytes = b"".join(chunks)
+                    if content_bytes and len(content_bytes) > 100:
+                        log.info(f"[Browser] Strategy A0 succeeded: {len(content_bytes):,} bytes")
+                        return content_bytes
+                    else:
+                        content_bytes = None
+                elif a0_result and not str(a0_result).startswith("server_error") and \
+                        not str(a0_result).startswith("fetch_error"):
+                    log.warning(f"[Browser] Strategy A0: unexpected result format: {str(a0_result)[:200]}")
+            except Exception as e:
+                log.warning(f"[Browser] Strategy A0 failed: {e}")
+
+            # ── Strategy A1: Click the download icon then "All Ingredient Data" ───
+            # Angular template confirmed selectors:
+            #   - Icon button: md-button[ng-click="$mdMenu.open()"] contains span "download"
+            #   - Menu item text: "All Ingredient Data"
+            if content_bytes is None:
+                log.info("[Browser] Strategy A1: clicking download icon in table row...")
+                try:
+                    # The download icon is a material-symbols span with text "download"
+                    # inside an md-button with ng-click="$mdMenu.open()"
+                    # First row = most recent version (H4T7N0LA)
+                    icon_clicked = False
                     for sel in [
-                        'md-menu-item:has-text("All Ingredient")',
-                        'button:has-text("All Ingredient")',
-                        'a:has-text("All Ingredient")',
-                        '[role="menuitem"]:has-text("All Ingredient")',
-                        '*:has-text("All Ingredient Data")',
+                        'md-button[ng-click="$mdMenu.open()"]',
+                        'span.material-symbols-outlined:text-is("download")',
+                        'button[ng-click*="mdMenu"]',
+                        '[ng-click="$mdMenu.open()"]',
                     ]:
                         try:
                             el = page.locator(sel)
                             if el.count() > 0:
-                                log.info(f"[Browser] Clicking download option: {sel}")
-                                with page.expect_download(timeout=300_000) as dl_info:
-                                    el.first.click(force=True)
-                                dl = dl_info.value
-                                tmp_path = tempfile.mktemp(suffix=".csv")
-                                dl.save_as(tmp_path)
-                                with open(tmp_path, "rb") as fh:
-                                    content_bytes = fh.read()
-                                try:
-                                    _os.unlink(tmp_path)
-                                except Exception:
-                                    pass
-                                if content_bytes and len(content_bytes) > 100:
-                                    log.info(f"[Browser] Strategy A succeeded: {len(content_bytes):,} bytes")
-                                    return content_bytes
-                                else:
-                                    log.warning("[Browser] Strategy A: downloaded file is empty, trying next strategy.")
-                                    content_bytes = None
+                                el.first.click(force=True)
+                                page.wait_for_timeout(1_500)
+                                log.info(f"[Browser] Strategy A1: opened menu via: {sel}")
+                                icon_clicked = True
                                 break
-                        except Exception as btn_e:
-                            log.warning(f"[Browser] Strategy A click {sel} failed: {btn_e}")
+                        except Exception:
                             continue
-                else:
-                    log.warning("[Browser] Strategy A: could not open download dropdown, skipping.")
-            except Exception as e:
-                log.warning(f"[Browser] Strategy A failed: {e}")
+
+                    if icon_clicked:
+                        # Click "All Ingredient Data" in the menu
+                        for sel in [
+                            'md-button:has-text("All Ingredient Data")',
+                            'md-menu-item:has-text("All Ingredient")',
+                            'button:has-text("All Ingredient Data")',
+                        ]:
+                            try:
+                                el = page.locator(sel)
+                                if el.count() > 0:
+                                    log.info(f"[Browser] Strategy A1: clicking menu item: {sel}")
+                                    with page.expect_download(timeout=300_000) as dl_info:
+                                        el.first.click(force=True)
+                                    dl = dl_info.value
+                                    tmp_path = tempfile.mktemp(suffix=".csv")
+                                    dl.save_as(tmp_path)
+                                    with open(tmp_path, "rb") as fh:
+                                        content_bytes = fh.read()
+                                    try:
+                                        _os.unlink(tmp_path)
+                                    except Exception:
+                                        pass
+                                    if content_bytes and len(content_bytes) > 100:
+                                        log.info(f"[Browser] Strategy A1 succeeded: {len(content_bytes):,} bytes")
+                                    else:
+                                        log.warning("[Browser] Strategy A1: downloaded file is empty.")
+                                        content_bytes = None
+                                    break
+                            except Exception as btn_e:
+                                log.warning(f"[Browser] Strategy A1 click {sel} failed: {btn_e}")
+                    else:
+                        log.warning("[Browser] Strategy A1: could not find download icon.")
+                except Exception as e:
+                    log.warning(f"[Browser] Strategy A1 failed: {e}")
 
             # ── Strategy B: Extract S3 URL from Angular scope ─────────────────
             if content_bytes is None:
@@ -1381,27 +1460,22 @@ def main() -> None:
     log.info(f"Actual report date : {display}")
 
     # Step 5 — Download the report
-    # Strategy order (fastest/most reliable first):
-    #   A. sheetUploadLink  — direct S3 URL already in history response (HAR confirmed)
-    #   B. download_report_api  — /download/semiFinished-combined (often times out)
+    # Strategy order:
+    #   B. download_report_api  — /download/semiFinished-combined (sometimes slow/times out)
     #   C. Playwright browser automation  — full UI fallback
     log.info("--- Step 4/5: Download ---")
     content = None
 
-    # Strategy A: sheetUploadLink (direct S3, no server-side generation needed)
-    try:
-        content = download_from_sheet_link(latest)
-        log.info("[SheetLink] Strategy A succeeded.")
-    except Exception as sl_err:
-        log.warning(f"[SheetLink] Strategy A failed: {sl_err}")
+    # NOTE: sheetUploadLink is NOT used here. It was confirmed (Aug 2026) to
+    # point at the current demand-plan INPUT template, not the generated
+    # report, and returns the same ~13KB file regardless of versionKey.
 
     # Strategy B: /download/semiFinished-combined API endpoint
-    if content is None:
-        try:
-            content = download_report_api(token, biz_id, version_key)
-            log.info("[API] Strategy B succeeded.")
-        except Exception as api_err:
-            log.warning(f"[API] Strategy B failed: {api_err}")
+    try:
+        content = download_report_api(token, biz_id, version_key)
+        log.info("[API] Strategy B succeeded.")
+    except Exception as api_err:
+        log.warning(f"[API] Strategy B failed: {api_err}")
 
     # Strategy C: Playwright full browser automation
     if content is None:

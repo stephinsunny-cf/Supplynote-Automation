@@ -21,10 +21,10 @@ jobs:
         run: |
           pip install -r github_action/requirements.txt
 
-      - name: Install Playwright + Chromium (fallback browser)
+      - name: Install Playwright + Edge (fallback browser)
         run: |
-          playwright install chromium
-          playwright install-deps chromium
+          playwright install msedge
+          playwright install-deps msedge
 
       - name: Write Google OAuth credentials from secrets
         run: |
