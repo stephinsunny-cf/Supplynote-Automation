@@ -43,7 +43,7 @@ jobs:
           GMAIL_TOKEN_PATH:       github_action/config/token.json
           DOWNLOAD_TYPE:          all
           REPORT_DATE:            today
-          REPORT_TITLE:           SupplyNote Current Stock Report
+          REPORT_TITLE:           All Ingredients Data (Today's Report - Every 2 Hours Generated)
           SKIP_DRIVE_UPLOAD:      true
         run: |
           cd github_action
